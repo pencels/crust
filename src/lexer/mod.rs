@@ -1,5 +1,6 @@
 pub mod token;
 
+/*
 use std::str::Chars;
 
 use lookahead::{lookahead, Lookahead};
@@ -507,3 +508,5 @@ fn is_identifier_continuer(c: char) -> bool {
         _ => false,
     }
 }
+
+ */

@@ -6,6 +6,8 @@ use crate::{
     util::{FileId, Span},
 };
 
+use super::result::{ParseError, ParseResult};
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Spanned<T>(pub Span, pub T);
 
@@ -115,15 +117,6 @@ pub struct Expr<'a> {
     pub kind: ExprKind<'a>,
 }
 
-impl<'a> Expr<'a> {
-    pub fn new(kind: ExprKind<'a>, file_id: FileId, start: usize, end: usize) -> Expr {
-        Expr {
-            span: Span::new(file_id, start, end),
-            kind,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum Operator {
     Simple(OpKind),
@@ -207,7 +200,10 @@ pub fn make_prefix_op_expr<'b>(
 ) -> Expr<'b> {
     let (start, end) = (op.span().start, e.span.end);
     let e = bump.alloc(e);
-    Expr::new(ExprKind::PrefixOp(op, e), file_id, start, end)
+    Expr {
+        kind: ExprKind::PrefixOp(op, e),
+        span: Span::new(file_id, start, end),
+    }
 }
 
 pub fn make_binop_expr<'b>(
@@ -250,7 +246,10 @@ pub fn make_call_expr<'b>(
     let (start, end) = (callee.span.start, end_span);
     let callee = bump.alloc(callee);
     let args = bump.alloc_slice_fill_iter(args);
-    Expr::new(ExprKind::Call(callee, args), file_id, start, end)
+    Expr {
+        kind: ExprKind::Call(callee, args),
+        span: Span::new(file_id, start, end),
+    }
 }
 
 pub fn make_block_expr<'b>(
@@ -262,7 +261,10 @@ pub fn make_block_expr<'b>(
 ) -> Expr<'b> {
     let stmts = stmts.unwrap_or_else(|| vec![]);
     let stmts = bump.alloc_slice_fill_iter(stmts);
-    Expr::new(ExprKind::Block(stmts), file_id, start, end)
+    Expr {
+        kind: ExprKind::Block(stmts),
+        span: Span::new(file_id, start, end),
+    }
 }
 
 pub fn make_tuple_expr<'b>(
@@ -284,16 +286,21 @@ pub fn make_array_expr<'b, 'input>(
     file_id: FileId,
     start: usize,
     exprs: Vec<Expr<'b>>,
-    size: Option<&'input str>,
+    size: Option<Spanned<&'input str>>,
     end: usize,
-) -> Expr<'b> {
+) -> ParseResult<Expr<'b>> {
     let exprs = bump.alloc_slice_fill_iter(exprs);
-    let size = size
-        .map(|size| usize::from_str(size).expect("ICE: array size should be an unsigned integer"));
-    Expr {
+    let size = match size {
+        Some(size) => Some(
+            usize::from_str(size.item())
+                .map_err(|_| ParseError::ArraySizeMustBeNonNegativeInteger { span: size.span() })?,
+        ),
+        None => None,
+    };
+    Ok(Expr {
         kind: ExprKind::Array(exprs, size),
         span: Span::new(file_id, start, end),
-    }
+    })
 }
 
 pub fn make_if_expr<'b>(
@@ -309,7 +316,10 @@ pub fn make_if_expr<'b>(
     inner_ifs.insert(0, (condition, then_block));
     let inner_ifs = bump.alloc_slice_fill_iter(inner_ifs);
     let else_block = bump.alloc(else_block);
-    Expr::new(ExprKind::If(inner_ifs, else_block), file_id, start, end)
+    Expr {
+        kind: ExprKind::If(inner_ifs, else_block),
+        span: Span::new(file_id, start, end),
+    }
 }
 
 // Statement builder functions
@@ -382,17 +392,18 @@ pub fn make_array_type<'b, 'input>(
     file_id: FileId,
     start: usize,
     ty: Type<'b>,
-    int: &'input str,
+    int: Spanned<&'input str>,
     end: usize,
-) -> Type<'b> {
+) -> ParseResult<Type<'b>> {
     let ty = bump.alloc(ty);
-    Type {
+    Ok(Type {
         kind: TypeKind::Array(
             ty,
-            usize::from_str(int).expect("ICE: array size should be an unsigned integer."),
+            usize::from_str(int.item())
+                .map_err(|_| ParseError::ArraySizeMustBeNonNegativeInteger { span: int.span() })?,
         ),
         span: Span::new(file_id, start, end),
-    }
+    })
 }
 
 pub fn make_tuple_type<'b>(

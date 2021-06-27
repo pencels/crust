@@ -1,3 +1,4 @@
+use lalrpop_util::ParseError;
 use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, Operator::{self, *}, OpKind};
 use super::result;
 use crate::util::{FileId, Span};
@@ -86,7 +87,8 @@ ExprWithoutBlock: Expr<'b> = {
 };
 
 TupleExpr: Expr<'b> = <@L> "(" <TupleDelimited<Expr, ",">> ")" <@R> => ast::make_tuple_expr(bump, file_id, <>);
-ArrayExpr: Expr<'b> = <@L> "[" <Delimited<Expr, ",">> <(";" <Int>)?> "]" <@R> => ast::make_array_expr(bump, file_id, <>);
+ArrayExpr: Expr<'b> = <@L> "[" <Delimited<Expr, ",">> <(";" <Spanned<Int>>)?> "]" <@R> =>? ast::make_array_expr(bump, file_id, <>)
+    .map_err(|error| ParseError::User { error });
 BlockExpr: Expr<'b> = <@L> "{" <Stmts?> "}" <@R> => ast::make_block_expr(bump, file_id, <>);
 
 Stmts: Vec<Stmt<'b>> = {
@@ -117,7 +119,8 @@ Type: Type<'b> = {
     <id: Spanned<Id>> => ast::make_id_type(bump, file_id, <>),
     <@L> "*" <"mut"?> <Type> => ast::make_pointer_type(bump, file_id, <>),
     <@L> "[" <Type> "]" <@R> => ast::make_slice_type(bump, file_id, <>),
-    <@L> "[" <Type> ";" <Int> "]" <@R> => ast::make_array_type(bump, file_id, <>),
+    <@L> "[" <Type> ";" <Spanned<Int>> "]" <@R> =>? ast::make_array_type(bump, file_id, <>)
+        .map_err(|error| ParseError::User { error }),
     <@L> "(" <TupleDelimited<Type, ",">> ")" <@R> => ast::make_tuple_type(bump, file_id, <>),
     <@L> "fn" "(" <Delimited<Type, ",">> ")" <("->" <Type>)?> <@R> => ast::make_fn_type(bump, file_id, <>),
 };
@@ -243,8 +246,14 @@ Delimited<T, Delim>: Vec<T> = {
     }
 };
 
-Char = r"'\?[^']'";
+Char = {
+    r"'\\?[^']'",
+    Spanned<"''"> =>?
+        Err(ParseError::User { error: result::ParseError::EmptyChar {
+            span: <>.span(),
+        }}),
+};
 Str = r#""(\.|[^"])*""#;
 Id = r"[A-Za-z_$][A-Za-z0-9_]*";
-Int = r"0|[1-9]+\d*";
+Int = r"0|-?[1-9]+\d*";
 Float = r"[+-]?\d+\.\d*";

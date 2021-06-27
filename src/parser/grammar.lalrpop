@@ -1,0 +1,250 @@
+use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, Operator::{self, *}, OpKind};
+use super::result;
+use crate::util::{FileId, Span};
+use bumpalo::Bump;
+
+grammar<'b>(bump: &'b Bump, file_id: FileId);
+
+extern {
+    type Error = result::ParseError;
+}
+
+match {
+    r"\s*" => { }, // The default whitespace skipping is disabled an `ignore pattern` is specified
+    r"//[^\n\r]*[\n\r]*" => { }, // Skip `// comments`
+    r"/\*([^\*]*\*+[^\*/])*([^\*]*\*+|[^\*])*\*/" => { },  // Skip `/* comments */`
+    _,
+}
+
+pub Program: Vec<Defn<'b>> = {
+    Defn*,
+};
+
+Expr = {
+    ExprWithBlock,
+    ExprWithoutBlock,
+};
+
+ExprWithBlock: Expr<'b> = {
+    <@L> "if" <Expr> <BlockExpr> <("else" "if" <Expr> <BlockExpr>)*> <("else" <BlockExpr>)?> <@R> =>
+        ast::make_if_expr(bump, file_id, <>),
+};
+
+ExprWithoutBlock: Expr<'b> = {
+    #[precedence(level="1")]
+    "(" <Expr> ")",
+    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, None), <>),
+    Spanned<Int> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Int(s), <>),
+    Spanned<Float> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Float(s), <>),
+    Spanned<Char> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Char(s), <>),
+    Spanned<Str> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Str(s), <>),
+    BlockExpr,
+    TupleExpr,
+    ArrayExpr,
+
+    #[precedence(level="2")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<MemberOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="3")] #[assoc(side="left")]
+    <ExprWithoutBlock> "(" <Delimited<Expr, ",">> ")" <@R> => ast::make_call_expr(bump, file_id, <>),
+
+    #[precedence(level="4")]
+    Spanned<UnaryOp> ExprWithoutBlock => ast::make_prefix_op_expr(bump, file_id, <>),
+
+    #[precedence(level="5")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<CastOp> Type => ast::make_cast_expr(bump, file_id, <>),
+
+    #[precedence(level="6")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<MulOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="7")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<AddOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="8")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<ShiftOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="9")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<BitAndOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="10")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<BitXorOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="11")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<BitOrOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="12")] #[assoc(side="none")]
+    ExprWithoutBlock Spanned<ComparisonOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="13")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<AndOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="14")] #[assoc(side="left")]
+    ExprWithoutBlock Spanned<OrOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+
+    #[precedence(level="15")] #[assoc(side="right")]
+    ExprWithoutBlock Spanned<AssignOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
+};
+
+TupleExpr: Expr<'b> = <@L> "(" <TupleDelimited<Expr, ",">> ")" <@R> => ast::make_tuple_expr(bump, file_id, <>);
+ArrayExpr: Expr<'b> = <@L> "[" <Delimited<Expr, ",">> <(";" <Int>)?> "]" <@R> => ast::make_array_expr(bump, file_id, <>);
+BlockExpr: Expr<'b> = <@L> "{" <Stmts?> "}" <@R> => ast::make_block_expr(bump, file_id, <>);
+
+Stmts: Vec<Stmt<'b>> = {
+    Stmt+,
+    <mut stmts:Stmt+> <expr:ExprWithoutBlock> => {
+        let stmt = ast::make_expr_stmt(bump, file_id, false, expr);
+        stmts.push(stmt);
+        stmts
+    },
+    ExprWithoutBlock => vec![ast::make_expr_stmt(bump, file_id, false, <>)],
+};
+
+Stmt = {
+    LetStmt,
+    ExprStmt,
+};
+
+LetStmt: Stmt<'b> = {
+    <@L> "let" <DeclInfo> "=" <Expr> ";" <@R> => ast::make_let_stmt(bump, file_id, <>),
+};
+
+ExprStmt: Stmt<'b> = {
+    <ExprWithoutBlock> ";" => ast::make_expr_stmt(bump, file_id, false, <>),
+    <expr:ExprWithBlock> <semi:";"?> => ast::make_expr_stmt(bump, file_id, semi.is_some(), expr),
+};
+
+Type: Type<'b> = {
+    <id: Spanned<Id>> => ast::make_id_type(bump, file_id, <>),
+    <@L> "*" <"mut"?> <Type> => ast::make_pointer_type(bump, file_id, <>),
+    <@L> "[" <Type> "]" <@R> => ast::make_slice_type(bump, file_id, <>),
+    <@L> "[" <Type> ";" <Int> "]" <@R> => ast::make_array_type(bump, file_id, <>),
+    <@L> "(" <TupleDelimited<Type, ",">> ")" <@R> => ast::make_tuple_type(bump, file_id, <>),
+    <@L> "fn" "(" <Delimited<Type, ",">> ")" <("->" <Type>)?> <@R> => ast::make_fn_type(bump, file_id, <>),
+};
+
+Defn: Defn<'b> = {
+    <@L> "fn" <Id> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> <BlockExpr> <@R> => ast::make_fn_defn(bump, file_id, <>),
+    <@L> "static" <DeclInfo> "=" <Expr> ";" <@R> => ast::make_static_defn(bump, file_id, <>),
+    StructDefn,
+};
+
+StructDefn: Defn<'b> = {
+    <@L> "struct" <Spanned<Id>> "{" <Delimited<DeclInfo, ",">> "}" <@R> => ast::make_struct_defn(bump, file_id, <>),
+    <l:@L> "struct" <id:Spanned<Id>> ";" <r:@R> => ast::make_struct_defn(bump, file_id, l, id, vec![], r),
+};
+
+DeclInfo: DeclInfo<'b> = {
+    <l:@L> <m:"mut"?> <name:Id> ":" <ty:Type> <r:@R> => {
+        let name = bump.alloc_str(name);
+        DeclInfo {
+            mutable: m.is_some(),
+            name,
+            ty,
+            span: Span::new(file_id, l, r),
+        }
+    },
+};
+
+MemberOp: Operator = {
+    "." => Simple(OpKind::Dot),
+};
+
+UnaryOp: Operator = {
+    "-" => Simple(OpKind::Minus),
+    "&" => Simple(OpKind::Amp),
+    "&" "mut" => Simple(OpKind::AmpMut),
+    "*" => Simple(OpKind::Star),
+    "!" => Simple(OpKind::Bang),
+    "~" => Simple(OpKind::Tilde),
+};
+
+CastOp: Operator = {
+    "as" => Simple(OpKind::As),
+};
+
+MulOp: Operator = {
+    "*" => Simple(OpKind::Star),
+    "/" => Simple(OpKind::Slash),
+    "%" => Simple(OpKind::Percent),
+};
+
+AddOp: Operator = {
+    "+" => Simple(OpKind::Plus),
+    "-" => Simple(OpKind::Minus),
+};
+
+ShiftOp: Operator = {
+    "<<" => Simple(OpKind::LtLt),
+    ">>" => Simple(OpKind::GtGt),
+};
+
+BitAndOp: Operator = {
+    "&" => Simple(OpKind::Amp),
+};
+
+BitXorOp: Operator = {
+    "^" => Simple(OpKind::Caret),
+};
+
+BitOrOp: Operator = {
+    "|" => Simple(OpKind::Pipe),
+};
+
+ComparisonOp: Operator = {
+    "==" => Simple(OpKind::EqEq),
+    "!=" => Simple(OpKind::Ne),
+    "<" => Simple(OpKind::Lt),
+    ">" => Simple(OpKind::Gt),
+    "<=" => Simple(OpKind::Le),
+    ">=" => Simple(OpKind::Ge),
+};
+
+AndOp: Operator = {
+    "&&" => Simple(OpKind::AmpAmp),
+};
+
+OrOp: Operator = {
+    "||" => Simple(OpKind::PipePipe),
+};
+
+AssignOp: Operator = {
+    "=" => Simple(OpKind::Eq),
+    "+=" => CompoundAssignment(OpKind::Plus),
+    "-=" => CompoundAssignment(OpKind::Minus),
+    "*=" => CompoundAssignment(OpKind::Star),
+    "/=" => CompoundAssignment(OpKind::Slash),
+    "%=" => CompoundAssignment(OpKind::Percent),
+    "&=" => CompoundAssignment(OpKind::Amp),
+    "|=" => CompoundAssignment(OpKind::Pipe),
+    "^=" => CompoundAssignment(OpKind::Caret),
+    "<<=" => CompoundAssignment(OpKind::LtLt),
+    ">>=" => CompoundAssignment(OpKind::GtGt),
+};
+
+Spanned<T>: Spanned<T> = {
+    <l:@L> <t:T> <r:@R> => Spanned(Span::new(file_id, l, r), t),
+};
+
+TupleDelimited<T, Delim>: Vec<T> = {
+    () => vec![],
+    <e:T> "," <mut es:Delimited<T, ",">> => {
+        es.insert(0, e);
+        es
+    },
+};
+
+Delimited<T, Delim>: Vec<T> = {
+    <mut v:(<T> Delim)*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+Char = r"'\?[^']'";
+Str = r#""(\.|[^"])*""#;
+Id = r"[A-Za-z_$][A-Za-z0-9_]*";
+Int = r"0|[1-9]+\d*";
+Float = r"[+-]?\d+\.\d*";

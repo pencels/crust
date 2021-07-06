@@ -1,0 +1,11 @@
+fn test() {
+    let mut i: int = 420;
+
+    let p: *int = &i;
+    let mp: *mut int = &mut i;
+
+    let q: *int = p;        // OK
+    // let mq: *mut int = p;   // NOT OK
+    let q: *int = mp;       // OK
+    let mq: *mut int = mp;  // OK
+}

@@ -1,3 +1,42 @@
+struct Range {
+    start: int,
+    end: int,
+}
+
+struct RangeFrom {
+    start: int,
+}
+
+struct RangeTo {
+    end: int,
+}
+
+struct RangeFull {}
+
+fn print(s: str) {}
+
+fn qsort(arr: *mut [int], compare: fn(*int, *int) -> int) {
+
+}
+
+fn compare_int(left: *int, right: *int) -> int {
+    *left - *right
+}
+
+fn max(x: int, y: int) -> int {
+    if x > y {
+        x
+    } else {
+        y
+    }
+}
+
 fn main() {
-    let x: [int] = [0, 1, 2, 3];
+    let mut pizza = [4, 3, 1, 2, 6, 5];
+
+    let slice = &mut pizza[..];
+    let index = ..;
+    let thin_slice = &mut (*slice)[index];
+
+    qsort(thin_slice, compare_int);
 }

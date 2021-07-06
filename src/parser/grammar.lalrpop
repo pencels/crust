@@ -1,5 +1,6 @@
 use lalrpop_util::ParseError;
-use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, Operator::{self, *}, OpKind};
+use std::cell::Cell;
+use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, LetDeclInfo, Operator::{self, *}, BinOpKind, PrefixOpKind, Field};
 use super::result;
 use crate::util::{FileId, Span};
 use bumpalo::Bump;
@@ -21,75 +22,130 @@ pub Program: Vec<Defn<'b>> = {
     Defn*,
 };
 
-Expr = {
-    ExprWithBlock,
-    ExprWithoutBlock,
-};
-
 ExprWithBlock: Expr<'b> = {
-    <@L> "if" <Expr> <BlockExpr> <("else" "if" <Expr> <BlockExpr>)*> <("else" <BlockExpr>)?> <@R> =>
+    BlockExpr,
+    <@L> "if" <CondExpr> <BlockExpr> <("else" "if" <CondExpr> <BlockExpr>)*> <("else" <BlockExpr>)?> <@R> =>
         ast::make_if_expr(bump, file_id, <>),
 };
 
-ExprWithoutBlock: Expr<'b> = {
-    #[precedence(level="1")]
-    "(" <Expr> ")",
-    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, None), <>),
+ExprConfig<Cfg> = ExprConfig16<Cfg>;
+Expr = ExprConfig<"BS">;
+CondExpr = ExprConfig<"">;
+ExprWithoutBlock = ExprConfig<"S">;
+
+AtomicExpr: Expr<'b> = {
+    <l:@L> "(" <e:Expr> ")" <r:@R> => {
+        Expr {
+            kind: ExprKind::Group(bump.alloc(e)),
+            span: Span::new(file_id, l, r),
+        }
+    },
+    BoolExpr,
+    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None)), <>),
     Spanned<Int> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Int(s), <>),
     Spanned<Float> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Float(s), <>),
     Spanned<Char> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Char(s), <>),
     Spanned<Str> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Str(s), <>),
-    BlockExpr,
     TupleExpr,
     ArrayExpr,
-
-    #[precedence(level="2")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<MemberOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="3")] #[assoc(side="left")]
-    <ExprWithoutBlock> "(" <Delimited<Expr, ",">> ")" <@R> => ast::make_call_expr(bump, file_id, <>),
-
-    #[precedence(level="4")]
-    Spanned<UnaryOp> ExprWithoutBlock => ast::make_prefix_op_expr(bump, file_id, <>),
-
-    #[precedence(level="5")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<CastOp> Type => ast::make_cast_expr(bump, file_id, <>),
-
-    #[precedence(level="6")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<MulOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="7")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<AddOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="8")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<ShiftOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="9")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<BitAndOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="10")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<BitXorOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="11")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<BitOrOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="12")] #[assoc(side="none")]
-    ExprWithoutBlock Spanned<ComparisonOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="13")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<AndOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="14")] #[assoc(side="left")]
-    ExprWithoutBlock Spanned<OrOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
-
-    #[precedence(level="15")] #[assoc(side="right")]
-    ExprWithoutBlock Spanned<AssignOp> ExprWithoutBlock => ast::make_binop_expr(bump, file_id, <>),
 };
 
+ExprConfig1<Cfg>: Expr<'b> = {
+    AtomicExpr,
+    StructExpr if Cfg ~~ "S",
+    ExprWithBlock if Cfg ~~ "B",
+};
+
+ExprConfig2<Cfg>: Expr<'b> = {
+    ExprConfig1<Cfg>,
+    ExprConfig2<Cfg> Spanned<"."> FieldExpr => ast::make_field_expr(bump, file_id, <>),
+};
+
+ExprConfig3<Cfg>: Expr<'b> = {
+    ExprConfig2<Cfg>,
+    <ExprConfig3<Cfg>> "(" <Delimited<Expr, ",">> ")" <@R> => ast::make_call_expr(bump, file_id, <>),
+    <ExprConfig3<Cfg>> "[" <Expr> "]" <@R> => ast::make_index_expr(bump, file_id, <>),
+};
+
+ExprConfig4<Cfg>: Expr<'b> = {
+    ExprConfig3<Cfg>,
+    Spanned<UnaryOp> ExprConfig4<Cfg> => ast::make_prefix_op_expr(bump, file_id, <>),
+};
+
+ExprConfig5<Cfg>: Expr<'b> = {
+    ExprConfig4<Cfg>,
+    ExprConfig5<Cfg> Spanned<"as"> Type => ast::make_cast_expr(bump, file_id, <>),
+};
+
+ExprConfig6<Cfg>: Expr<'b> = {
+    ExprConfig5<Cfg>,
+    ExprConfig6<Cfg> Spanned<MulOp> ExprConfig5<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig7<Cfg>: Expr<'b> = {
+    ExprConfig6<Cfg>,
+    ExprConfig7<Cfg> Spanned<AddOp> ExprConfig6<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig8<Cfg>: Expr<'b> = {
+    ExprConfig7<Cfg>,
+    ExprConfig8<Cfg> Spanned<ShiftOp> ExprConfig7<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig9<Cfg>: Expr<'b> = {
+    ExprConfig8<Cfg>,
+    ExprConfig9<Cfg> Spanned<BitAndOp> ExprConfig8<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig10<Cfg>: Expr<'b> = {
+    ExprConfig9<Cfg>,
+    ExprConfig10<Cfg> Spanned<BitXorOp> ExprConfig9<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig11<Cfg>: Expr<'b> = {
+    ExprConfig10<Cfg>,
+    ExprConfig11<Cfg> Spanned<BitOrOp> ExprConfig10<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig12<Cfg>: Expr<'b> = {
+    ExprConfig11<Cfg>,
+    ExprConfig11<Cfg> Spanned<ComparisonOp> ExprConfig11<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig13<Cfg>: Expr<'b> = {
+    ExprConfig12<Cfg>,
+    ExprConfig13<Cfg> Spanned<AndOp> ExprConfig12<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig14<Cfg>: Expr<'b> = {
+    ExprConfig13<Cfg>,
+    ExprConfig14<Cfg> Spanned<OrOp> ExprConfig13<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+};
+
+ExprConfig15<Cfg>: Expr<'b> = {
+    ExprConfig14<Cfg>,
+    <l:ExprConfig14<Cfg>> <op:Spanned<RangeOp>> <r:ExprConfig14<Cfg>> => ast::make_range_expr(bump, file_id, op, Some(l), Some(r)),
+    <op:Spanned<RangeOp>> <r:ExprConfig14<Cfg>> => ast::make_range_expr(bump, file_id, op, None, Some(r)),
+    <l:ExprConfig14<Cfg>> <op:Spanned<RangeOp>> => ast::make_range_expr(bump, file_id, op, Some(l), None),
+    <op:Spanned<RangeOp>> => ast::make_range_expr(bump, file_id, op, None, None),
+};
+
+ExprConfig16<Cfg>: Expr<'b> = {
+    ExprConfig15<Cfg>,
+    ExprConfig15<Cfg> Spanned<AssignOp> ExprConfig16<Cfg> => ast::make_binop_expr(bump, file_id, <>),
+    ExprConfig15<Cfg> Spanned<AssignOp> ExprWithBlock if Cfg !~ "B" => ast::make_binop_expr(bump, file_id, <>),
+};
+
+BoolExpr: Expr<'b> = {
+    <@L> "true" <@R> => ast::make_spanned_expr(file_id, ExprKind::Bool(true), <>),
+    <@L> "false" <@R> => ast::make_spanned_expr(file_id, ExprKind::Bool(false), <>),
+};
 TupleExpr: Expr<'b> = <@L> "(" <TupleDelimited<Expr, ",">> ")" <@R> => ast::make_tuple_expr(bump, file_id, <>);
 ArrayExpr: Expr<'b> = <@L> "[" <Delimited<Expr, ",">> <(";" <Spanned<Int>>)?> "]" <@R> =>? ast::make_array_expr(bump, file_id, <>)
     .map_err(|error| ParseError::User { error });
 BlockExpr: Expr<'b> = <@L> "{" <Stmts?> "}" <@R> => ast::make_block_expr(bump, file_id, <>);
+StructExpr: Expr<'b> = <@L> <Spanned<Id>> "{" <Delimited<StructExprField, ",">> "}" <@R> => ast::make_struct_expr(bump, file_id, <>);
+StructExprField: (Spanned<&'b str>, Expr<'b>) = <id:Spanned<Id>> ":" <e:Expr> => (id.map(|id| &*bump.alloc_str(id)), e);
 
 Stmts: Vec<Stmt<'b>> = {
     Stmt+,
@@ -107,11 +163,11 @@ Stmt = {
 };
 
 LetStmt: Stmt<'b> = {
-    <@L> "let" <DeclInfo> "=" <Expr> ";" <@R> => ast::make_let_stmt(bump, file_id, <>),
+    <@L> "let" <LetDeclInfo> "=" <Expr> ";" <@R> => ast::make_let_stmt(bump, file_id, <>),
 };
 
 ExprStmt: Stmt<'b> = {
-    <ExprWithoutBlock> ";" => ast::make_expr_stmt(bump, file_id, false, <>),
+    <ExprWithoutBlock> ";" => ast::make_expr_stmt(bump, file_id, true, <>),
     <expr:ExprWithBlock> <semi:";"?> => ast::make_expr_stmt(bump, file_id, semi.is_some(), expr),
 };
 
@@ -126,103 +182,120 @@ Type: Type<'b> = {
 };
 
 Defn: Defn<'b> = {
-    <@L> "fn" <Id> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> <BlockExpr> <@R> => ast::make_fn_defn(bump, file_id, <>),
-    <@L> "static" <DeclInfo> "=" <Expr> ";" <@R> => ast::make_static_defn(bump, file_id, <>),
+    <@L> "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> <BlockExpr> <@R> => ast::make_fn_defn(bump, file_id, <>),
+    <@L> "static" <LetDeclInfo> "=" <Expr> ";" <@R> => ast::make_static_defn(bump, file_id, <>),
     StructDefn,
 };
 
 StructDefn: Defn<'b> = {
     <@L> "struct" <Spanned<Id>> "{" <Delimited<DeclInfo, ",">> "}" <@R> => ast::make_struct_defn(bump, file_id, <>),
-    <l:@L> "struct" <id:Spanned<Id>> ";" <r:@R> => ast::make_struct_defn(bump, file_id, l, id, vec![], r),
+    //<l:@L> "struct" <id:Spanned<Id>> ";" <r:@R> => ast::make_struct_defn(bump, file_id, l, id, vec![], r),
 };
 
 DeclInfo: DeclInfo<'b> = {
-    <l:@L> <m:"mut"?> <name:Id> ":" <ty:Type> <r:@R> => {
-        let name = bump.alloc_str(name);
+    <l:@L> <m:Spanned<"mut">?> <name:Spanned<Id>> ":" <ty_ast:Type> <r:@R> => {
+        let name = name.map(|name| &*bump.alloc_str(name));
         DeclInfo {
             mutable: m.is_some(),
             name,
-            ty,
+            ty: Cell::new(None),
+            ty_ast,
             span: Span::new(file_id, l, r),
+            id: Cell::new(None),
         }
     },
 };
 
-MemberOp: Operator = {
-    "." => Simple(OpKind::Dot),
+LetDeclInfo: LetDeclInfo<'b> = {
+    <l:@L> <m:"mut"?> <name:Spanned<Id>> <ty_ast:(":" <Type>)?> <r:@R> => {
+        let name = name.map(|name| &*bump.alloc_str(name));
+        LetDeclInfo {
+            mutable: m.is_some(),
+            name,
+            ty: Cell::new(None),
+            ty_ast,
+            span: Span::new(file_id, l, r),
+            id: Cell::new(None),
+        }
+    },
 };
 
-UnaryOp: Operator = {
-    "-" => Simple(OpKind::Minus),
-    "&" => Simple(OpKind::Amp),
-    "&" "mut" => Simple(OpKind::AmpMut),
-    "*" => Simple(OpKind::Star),
-    "!" => Simple(OpKind::Bang),
-    "~" => Simple(OpKind::Tilde),
-};
-
-CastOp: Operator = {
-    "as" => Simple(OpKind::As),
+UnaryOp: PrefixOpKind = {
+    "-" => PrefixOpKind::Minus,
+    "&" => PrefixOpKind::Amp,
+    "&" "mut" => PrefixOpKind::AmpMut,
+    "*" => PrefixOpKind::Star,
+    "!" => PrefixOpKind::Bang,
+    "~" => PrefixOpKind::Tilde,
 };
 
 MulOp: Operator = {
-    "*" => Simple(OpKind::Star),
-    "/" => Simple(OpKind::Slash),
-    "%" => Simple(OpKind::Percent),
+    "*" => Simple(BinOpKind::Star),
+    "/" => Simple(BinOpKind::Slash),
+    "%" => Simple(BinOpKind::Percent),
 };
 
 AddOp: Operator = {
-    "+" => Simple(OpKind::Plus),
-    "-" => Simple(OpKind::Minus),
+    "+" => Simple(BinOpKind::Plus),
+    "-" => Simple(BinOpKind::Minus),
 };
 
 ShiftOp: Operator = {
-    "<<" => Simple(OpKind::LtLt),
-    ">>" => Simple(OpKind::GtGt),
+    "<<" => Simple(BinOpKind::LtLt),
+    ">>" => Simple(BinOpKind::GtGt),
 };
 
 BitAndOp: Operator = {
-    "&" => Simple(OpKind::Amp),
+    "&" => Simple(BinOpKind::Amp),
 };
 
 BitXorOp: Operator = {
-    "^" => Simple(OpKind::Caret),
+    "^" => Simple(BinOpKind::Caret),
 };
 
 BitOrOp: Operator = {
-    "|" => Simple(OpKind::Pipe),
+    "|" => Simple(BinOpKind::Pipe),
 };
 
 ComparisonOp: Operator = {
-    "==" => Simple(OpKind::EqEq),
-    "!=" => Simple(OpKind::Ne),
-    "<" => Simple(OpKind::Lt),
-    ">" => Simple(OpKind::Gt),
-    "<=" => Simple(OpKind::Le),
-    ">=" => Simple(OpKind::Ge),
+    "==" => Simple(BinOpKind::EqEq),
+    "!=" => Simple(BinOpKind::Ne),
+    "<" => Simple(BinOpKind::Lt),
+    ">" => Simple(BinOpKind::Gt),
+    "<=" => Simple(BinOpKind::Le),
+    ">=" => Simple(BinOpKind::Ge),
 };
 
 AndOp: Operator = {
-    "&&" => Simple(OpKind::AmpAmp),
+    "&&" => Simple(BinOpKind::AmpAmp),
 };
 
 OrOp: Operator = {
-    "||" => Simple(OpKind::PipePipe),
+    "||" => Simple(BinOpKind::PipePipe),
+};
+
+RangeOp: &'input str = {
+    ".." => <>,
 };
 
 AssignOp: Operator = {
-    "=" => Simple(OpKind::Eq),
-    "+=" => CompoundAssignment(OpKind::Plus),
-    "-=" => CompoundAssignment(OpKind::Minus),
-    "*=" => CompoundAssignment(OpKind::Star),
-    "/=" => CompoundAssignment(OpKind::Slash),
-    "%=" => CompoundAssignment(OpKind::Percent),
-    "&=" => CompoundAssignment(OpKind::Amp),
-    "|=" => CompoundAssignment(OpKind::Pipe),
-    "^=" => CompoundAssignment(OpKind::Caret),
-    "<<=" => CompoundAssignment(OpKind::LtLt),
-    ">>=" => CompoundAssignment(OpKind::GtGt),
+    "=" => Assign(None),
+    "+=" => Assign(Some(BinOpKind::Plus)),
+    "-=" => Assign(Some(BinOpKind::Minus)),
+    "*=" => Assign(Some(BinOpKind::Star)),
+    "/=" => Assign(Some(BinOpKind::Slash)),
+    "%=" => Assign(Some(BinOpKind::Percent)),
+    "&=" => Assign(Some(BinOpKind::Amp)),
+    "|=" => Assign(Some(BinOpKind::Pipe)),
+    "^=" => Assign(Some(BinOpKind::Caret)),
+    "<<=" => Assign(Some(BinOpKind::LtLt)),
+    ">>=" => Assign(Some(BinOpKind::GtGt)),
 };
+
+FieldExpr: Spanned<Field<'b>> = {
+    Spanned<Id> => <>.map(|id| Field::Name(bump.alloc_str(id))),
+    Spanned<Int> => <>.map(|id| Field::Index(bump.alloc_str(id))),
+}
 
 Spanned<T>: Spanned<T> = {
     <l:@L> <t:T> <r:@R> => Spanned(Span::new(file_id, l, r), t),
@@ -255,5 +328,9 @@ Char = {
 };
 Str = r#""(\.|[^"])*""#;
 Id = r"[A-Za-z_$][A-Za-z0-9_]*";
-Int = r"0|-?[1-9]+\d*";
-Float = r"[+-]?\d+\.\d*";
+Int = {
+    UInt,
+    r"-[1-9]\d*",
+}
+UInt = r"0|[1-9]\d*";
+Float = r"[+-]?\d+\.\d+";

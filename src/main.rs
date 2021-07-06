@@ -1,9 +1,11 @@
+#![feature(nll)]
+
 mod lexer;
-mod lowering;
 mod parser;
+mod tyck;
 mod util;
 
-use std::{fs::File, io::Read, ops::Add};
+use std::{fs::File, io::Read};
 
 use bumpalo::Bump;
 use codespan_derive::IntoDiagnostic;
@@ -40,18 +42,31 @@ fn main() {
 
     let file_id = files.add(path.to_string(), buf.clone());
 
-    match parse_file(&bump, file_id, &buf) {
-        Ok(program) => {
-            for defn in program {
-                println!("{:?}", defn);
-            }
-        }
+    let program = match parse_file(&bump, file_id, &buf) {
+        Ok(program) => program,
         Err(lalrpop_util::ParseError::User { error }) => {
             let diagnostic = error.into_diagnostic();
             let writer = StandardStream::stderr(ColorChoice::Always);
             let config = codespan_reporting::term::Config::default();
             term::emit(&mut writer.lock(), &config, &files, &diagnostic).unwrap();
+            std::process::exit(1);
         }
-        Err(err) => eprintln!("{:?}", err),
+        Err(err) => {
+            eprintln!("{:?}", err);
+            std::process::exit(1);
+        }
+    };
+
+    match tyck::tyck_program(&program) {
+        Ok(_) => (),
+        Err(error) => {
+            let diagnostic = error.into_diagnostic();
+            let writer = StandardStream::stderr(ColorChoice::Always);
+            let mut config = codespan_reporting::term::Config::default();
+            config.start_context_lines = 10;
+            config.end_context_lines = 10;
+            term::emit(&mut writer.lock(), &config, &files, &diagnostic).unwrap();
+            std::process::exit(1);
+        }
     }
 }

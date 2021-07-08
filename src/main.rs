@@ -57,7 +57,9 @@ fn main() {
         }
     };
 
-    match tyck::tyck_program(&program) {
+    let bump = Bump::new();
+    let mut checker = tyck::TypeChecker::new(&bump);
+    match checker.tyck_program(&program) {
         Ok(_) => (),
         Err(error) => {
             let diagnostic = error.into_diagnostic();

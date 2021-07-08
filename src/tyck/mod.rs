@@ -3,6 +3,7 @@ mod result;
 use result::{TyckError, TyckResult};
 
 use bumpalo::Bump;
+use std::cell::Cell;
 use std::{collections::HashMap, fmt::Display};
 
 use std::str::FromStr;
@@ -275,16 +276,16 @@ fn tyck_assign(
 
 fn indexed_ty<'bump>(
     lhs_ty: Type<'bump>,
-    lhs: &Expr,
+    lhs_span: Span,
     index_ty: Type,
-    index: &Expr,
+    index_span: Span,
 ) -> TyckResult<Type<'bump>> {
     let elem_ty = match lhs_ty {
         Type::Slice(ty) => ty,
         Type::Array(ty, _) => ty,
         _ => {
             return Err(TyckError::TypeNotIndexable {
-                span: lhs.span,
+                span: lhs_span,
                 ty_name: human_type_name(&lhs_ty),
             })
         }
@@ -296,7 +297,7 @@ fn indexed_ty<'bump>(
         ) => Type::Slice(elem_ty),
         _ => {
             return Err(TyckError::TypeCannotBeUsedAsAnIndex {
-                span: index.span,
+                span: index_span,
                 ty_name: human_type_name(&index_ty),
             })
         }
@@ -357,6 +358,40 @@ fn is_assignable<'a>(assignee: &'a Type<'a>, ty: &'a Type<'a>) -> bool {
         }
         _ => assignee == ty,
     }
+}
+
+fn deref_until<'alloc, T>(
+    mut ty: Type<'alloc>,
+    num_derefs: &Cell<usize>,
+    cond: impl FnOnce(Type<'alloc>) -> TyckResult<T>,
+) -> TyckResult<T> {
+    while let Type::Pointer(_, inner) = ty {
+        num_derefs.set(num_derefs.get() + 1);
+        ty = *inner;
+    }
+    cond(ty)
+}
+
+fn deref_place_until<'alloc, T>(
+    mut ty: Type<'alloc>,
+    place_mut: bool,
+    num_derefs: &Cell<usize>,
+    cond: impl FnOnce(bool, Type<'alloc>) -> TyckResult<T>,
+) -> TyckResult<T> {
+    let mut ptr_mut = true;
+    while let Type::Pointer(m, inner) = ty {
+        num_derefs.set(num_derefs.get() + 1);
+        ty = *inner;
+        ptr_mut &= m;
+    }
+    cond(
+        if num_derefs.get() > 0 {
+            ptr_mut
+        } else {
+            place_mut
+        },
+        ty,
+    )
 }
 
 pub struct TypeChecker<'bump> {
@@ -650,15 +685,19 @@ impl<'check, 'bump> TypeChecker<'bump> {
                 let struct_name = self.bump.alloc_str(struct_name);
                 Ok(Type::Struct(struct_name))
             }
-            ExprKind::Field(expr, op_span, field) => {
+            ExprKind::Field(expr, op_span, field, num_derefs) => {
                 let expr_ty = self.tyck_expr(expr)?;
-                self.field_access_ty(Spanned(expr.span, expr_ty), field)
+                deref_until(expr_ty, num_derefs, |ty| {
+                    self.field_access_ty(Spanned(expr.span, ty), field)
+                })
             }
             ExprKind::Group(expr) => self.tyck_expr(expr),
-            ExprKind::Index(lhs, index) => {
+            ExprKind::Index(lhs, index, num_derefs) => {
                 let lhs_ty = self.tyck_expr(lhs)?;
                 let index_ty = self.tyck_expr(index)?;
-                Ok(indexed_ty(lhs_ty, lhs, index_ty, index)?)
+                deref_until(lhs_ty, num_derefs, |ty| {
+                    indexed_ty(ty, lhs.span, index_ty, index.span)
+                })
             }
             ExprKind::Range(start, end) => {
                 if let Some(start) = start {
@@ -690,18 +729,21 @@ impl<'check, 'bump> TypeChecker<'bump> {
         let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
 
         if !mutable {
-            match source.unwrap() {
-                Source::Id(s) => {
+            match source {
+                Some(Source::Id(s)) => {
                     return Err(TyckError::MutatingImmutableValue {
                         span: lhs.span,
                         source: s,
                     })
                 }
-                Source::Ptr(s) => {
+                Some(Source::Ptr(s)) => {
                     return Err(TyckError::MutatingImmutableValueThroughPointer {
                         span: lhs.span,
                         ptr: s,
                     })
+                }
+                None => {
+                    return Err(TyckError::MutatingImmutableValueOfUnknownCause { span: lhs.span })
                 }
             }
         }
@@ -946,17 +988,29 @@ impl<'check, 'bump> TypeChecker<'bump> {
                     _ => return Err(TyckError::DereferencingNonPointer { span: expr.span }),
                 }
             }
-            ExprKind::Field(expr, _, field) => {
+            ExprKind::Field(expr, _, field, num_derefs) => {
                 let (mutable, source, expr_ty) = self.tyck_place_expr(expr)?;
-                let result_ty = self.field_access_ty(Spanned(expr.span, expr_ty), field)?;
-                Ok((mutable, source, result_ty))
+                deref_place_until(expr_ty, mutable, num_derefs, move |mutable, ty| {
+                    let result_ty = self.field_access_ty(Spanned(expr.span, ty), field)?;
+                    Ok((
+                        mutable,
+                        if num_derefs.get() > 0 { None } else { source },
+                        result_ty,
+                    ))
+                })
             }
             ExprKind::Group(expr) => self.tyck_place_expr(expr),
-            ExprKind::Index(lhs, index) => {
+            ExprKind::Index(lhs, index, num_derefs) => {
                 let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
-                let index_ty = self.tyck_expr(index)?;
-                let place_ty = indexed_ty(lhs_ty, lhs, index_ty, index)?;
-                Ok((mutable, source, place_ty))
+                deref_place_until(lhs_ty, mutable, num_derefs, move |mutable, ty| {
+                    let index_ty = self.tyck_expr(index)?;
+                    let place_ty = indexed_ty(ty, lhs.span, index_ty, index.span)?;
+                    Ok((
+                        mutable,
+                        if num_derefs.get() > 0 { None } else { source },
+                        place_ty,
+                    ))
+                })
             }
             _ => Err(TyckError::NotAPlaceExpr { span: expr.span }),
         }

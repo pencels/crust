@@ -31,12 +31,28 @@ fn max(x: int, y: int) -> int {
     }
 }
 
+struct Bar {
+    child: *mut int,
+}
+
+struct Foo {
+    child: *mut Bar,
+}
+
+fn foo() {
+    let mut x = 0;
+    let mut b = Bar { child: &mut x };
+    let foo = Foo { child: &mut b };
+
+    *foo.child.child = 1;
+}
+
 fn main() {
     let mut pizza = [4, 3, 1, 2, 6, 5];
 
     let slice = &mut pizza[..];
     let index = ..;
-    let thin_slice = &mut (*slice)[index];
+    let thin_slice = &mut slice[index];
 
     qsort(thin_slice, compare_int);
 }

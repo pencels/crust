@@ -135,27 +135,15 @@ pub enum ExprKind<'a> {
     Cast(&'a Expr<'a>, Type<'a>),
 
     Group(&'a Expr<'a>),
-    Field(&'a Expr<'a>, Span, Spanned<Field<'a>>),
+    Field(&'a Expr<'a>, Span, Spanned<Field<'a>>, Cell<usize>),
     Call(&'a Expr<'a>, &'a [Expr<'a>]),
-    Index(&'a Expr<'a>, &'a Expr<'a>),
+    Index(&'a Expr<'a>, &'a Expr<'a>, Cell<usize>),
     Range(Option<&'a Expr<'a>>, Option<&'a Expr<'a>>),
     Block(&'a [Stmt<'a>]),
 
     Struct(Spanned<&'a str>, &'a [(Spanned<&'a str>, Expr<'a>)]),
 
     If(&'a [(Expr<'a>, Expr<'a>)], &'a Option<Expr<'a>>),
-}
-
-#[derive(Debug)]
-pub struct Index<'a> {
-    pub span: Span,
-    pub kind: IndexKind<'a>,
-}
-
-#[derive(Debug)]
-pub enum IndexKind<'a> {
-    Expr(&'a Expr<'a>),
-    Range(Option<&'a Expr<'a>>, Option<&'a Expr<'a>>),
 }
 
 #[derive(Debug)]
@@ -333,7 +321,7 @@ pub fn make_index_expr<'b>(
     let lhs = bump.alloc(lhs);
     let index = bump.alloc(index);
     Expr {
-        kind: ExprKind::Index(lhs, index),
+        kind: ExprKind::Index(lhs, index, Cell::new(0)),
         span: Span::new(file_id, start, end),
     }
 }
@@ -453,7 +441,7 @@ pub fn make_field_expr<'b, 'input>(
     let expr = bump.alloc(expr);
     let field_span = field.span();
     Expr {
-        kind: ExprKind::Field(expr, op.span(), field),
+        kind: ExprKind::Field(expr, op.span(), field, Cell::new(0)),
         span: expr.span.unite(field_span),
     }
 }

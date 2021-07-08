@@ -129,6 +129,12 @@ pub enum TyckError {
         ptr: Span,
     },
 
+    #[message = "Cannot mutate immutable value"]
+    MutatingImmutableValueOfUnknownCause {
+        #[primary = "figure it out you stupid binch"]
+        span: Span,
+    },
+
     #[message = "Invalid array size"]
     InvalidArraySize {
         #[primary = "given size is {size}"]

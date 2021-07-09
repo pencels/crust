@@ -1,5 +1,7 @@
+use std::convert::TryFrom;
 use std::{collections::HashMap, path::PathBuf};
 
+use inkwell::values::{BasicValue, CallableValue};
 use inkwell::{
     builder::Builder,
     context::Context,
@@ -7,7 +9,10 @@ use inkwell::{
     types::{BasicType, StringRadix, StructType},
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
+use inkwell::{AddressSpace, IntPredicate};
 
+use crate::parser::ast::{BinOpKind, Operator, Spanned};
+use crate::tyck::{VarId, RANGE_FROM_TY_NAME, RANGE_FULL_TY_NAME, RANGE_TO_TY_NAME, RANGE_TY_NAME};
 use crate::{
     parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind, Type},
     tyck::{self, StructInfo},
@@ -20,7 +25,7 @@ pub struct Emitter<'a, 'ctx, 'alloc> {
     pub opt_fn: Option<FunctionValue<'ctx>>,
 
     struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
-    variables: HashMap<String, PointerValue<'ctx>>,
+    variables: HashMap<VarId, PointerValue<'ctx>>,
 }
 
 impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
@@ -53,6 +58,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         };
 
         emitter.emit_struct_decls();
+        emitter.emit_fn_decls(program);
 
         for defn in program {
             emitter.emit_defn(defn);
@@ -72,10 +78,44 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             let field_types: Vec<_> = info
                 .members
                 .iter()
-                .map(|decl| self.ty_to_ll_ty(decl.ty))
+                .map(|decl| self.ty_to_ll_ty(decl.ty.get().expect("type")))
                 .collect();
 
             ty.set_body(field_types.as_slice(), false);
+        }
+    }
+
+    fn emit_fn_decls(&mut self, defns: &[Defn]) {
+        for defn in defns {
+            match &defn.kind {
+                DefnKind::Fn {
+                    decl,
+                    params,
+                    return_ty_ast,
+                    return_ty,
+                    body,
+                } => {
+                    let return_ty = return_ty
+                        .get()
+                        .expect("ICE: return ty should be set in tyck phase");
+                    let mut param_types: Vec<_> = params
+                        .iter()
+                        .map(|param| {
+                            let param_ty = param
+                                .ty
+                                .get()
+                                .expect("ICE: type not resolved in tyck phase");
+                            self.ty_to_ll_ty(param_ty)
+                        })
+                        .collect();
+                    self.module.add_function(
+                        decl.name.item(),
+                        self.ty_to_ll_ty(return_ty).fn_type(&mut param_types, false),
+                        None,
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -105,22 +145,10 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         return_ty: tyck::Type,
         body: &Expr,
     ) {
-        let mut param_types: Vec<_> = params
-            .iter()
-            .map(|param| {
-                let param_ty = param
-                    .ty
-                    .get()
-                    .expect("ICE: type not resolved in tyck phase");
-                self.ty_to_ll_ty(param_ty)
-            })
-            .collect();
-        let function = self.module.add_function(
-            decl.name.item(),
-            self.ty_to_ll_ty(return_ty).fn_type(&mut param_types, false),
-            None,
-        );
-
+        let function = self
+            .module
+            .get_function(decl.name.item())
+            .expect("function is declared");
         self.opt_fn = Some(function);
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -132,7 +160,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
 
             self.builder.build_store(slot, param);
 
-            self.variables.insert(name.to_string(), slot);
+            self.variables.insert(params[i].id.get().expect("id"), slot);
         }
 
         let body = self.emit_expr(body);
@@ -155,7 +183,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 let name = decl.name.item();
                 let slot = self.alloc_stack_slot(name, ty);
                 self.builder.build_store(slot, value);
-                self.variables.insert(name.to_string(), slot);
+                self.variables.insert(decl.id.get().expect("id"), slot);
                 self.unit_value()
             }
             StmtKind::Expr(expr) => self.emit_expr(expr),
@@ -177,7 +205,11 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 .into(),
             ExprKind::Float(f) => self.context.f32_type().const_float_from_string(f).into(),
             ExprKind::Str(_) => todo!(),
-            ExprKind::Char(c) => todo!(),
+            ExprKind::Char(c) => self
+                .context
+                .i8_type()
+                .const_int(c.bytes().nth(0).unwrap() as u64, false)
+                .into(),
             ExprKind::Tuple(exprs) => {
                 let mut struct_value = self
                     .ty_to_ll_ty(
@@ -198,39 +230,175 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 struct_value.into()
             }
             ExprKind::Array(_, _) => todo!(),
-            ExprKind::Id(name, id) => {
-                let ptr = self.variables.get(*name).expect("ICE: undefined variable");
-                self.builder.build_load(*ptr, "")
+            ExprKind::Id(name, id, is_func) => {
+                if is_func.get() {
+                    self.module
+                        .get_function(name)
+                        .expect("functions are forward declared")
+                        .as_global_value()
+                        .as_basic_value_enum()
+                } else {
+                    let ptr = self
+                        .variables
+                        .get(&id.get().expect("id"))
+                        .expect("ICE: undefined variable");
+                    self.builder.build_load(*ptr, "")
+                }
             }
             ExprKind::PrefixOp(_, _) => todo!(),
-            ExprKind::BinOp(_, _, _) => todo!(),
+            ExprKind::BinOp(Spanned(op_span, Operator::Simple(op)), lhs, rhs) => {
+                self.emit_simple_binop(*op, lhs, rhs)
+            }
+            ExprKind::BinOp(..) => todo!(),
             ExprKind::Cast(expr, _) => todo!("conversion operation"),
             ExprKind::Group(inner) => self.emit_expr(inner),
-            ExprKind::Field(_, _, _, _) => todo!(),
-            ExprKind::Call(_, _) => todo!(),
+            ExprKind::Field(lhs, _, field, num_derefs) => {
+                let mut value = self.emit_expr(lhs);
+                for _ in 0..num_derefs.get() {
+                    value = self.builder.build_load(value.into_pointer_value(), "");
+                }
+                let i = field.item().get_index();
+                self.builder
+                    .build_extract_value(value.into_struct_value(), i as u32, "")
+                    .expect("index oob")
+            }
+            ExprKind::Call(callee, args) => {
+                let callee_value = self.emit_expr(callee);
+                let args: Vec<_> = args.iter().map(|arg| self.emit_expr(arg)).collect();
+                self.builder
+                    .build_call(
+                        CallableValue::try_from(callee_value.into_pointer_value()).unwrap(),
+                        &args,
+                        "",
+                    )
+                    .try_as_basic_value()
+                    .unwrap_left()
+            }
             ExprKind::Index(_, _, _) => todo!(),
-            ExprKind::Range(_, _) => todo!(),
+            ExprKind::Range(start, end) => match (start, end) {
+                (Some(start), Some(end)) => {
+                    self.build_struct(RANGE_TY_NAME, &[("start", start), ("end", end)])
+                }
+                (None, Some(end)) => self.build_struct(RANGE_TO_TY_NAME, &[("end", end)]),
+                (Some(start), None) => self.build_struct(RANGE_FROM_TY_NAME, &[("start", start)]),
+                _ => self.build_struct(RANGE_FULL_TY_NAME, &[]),
+            },
             ExprKind::Block(stmts) => self.emit_block(stmts),
             ExprKind::Struct(name, inits) => {
-                let info = *self.struct_infos.get(name.item()).expect("die!!!");
-                let mut struct_value = self
-                    .module
-                    .get_struct_type(name.item())
-                    .expect("ICE: struct ll ty should be present")
-                    .get_undef();
-                for (init_name, expr) in inits.iter() {
-                    let value = self.emit_expr(expr);
-                    let i = info.member_index(init_name.item());
-                    struct_value = self
-                        .builder
-                        .build_insert_value(struct_value, value, i as u32, "")
-                        .expect("struct index oob")
-                        .into_struct_value();
-                }
-                struct_value.into()
+                let name = name.item();
+                let inits: Vec<_> = inits
+                    .iter()
+                    .map(|(field, expr)| (*field.item(), expr))
+                    .collect();
+                self.build_struct(name, inits.as_slice())
             }
-            ExprKind::If(_, _) => todo!(),
+            ExprKind::If(thens, els) => {
+                let mut branches = Vec::new();
+                for (cond, then) in *thens {
+                    let cond_value = self.emit_expr(cond);
+                    let then_block = self.context.append_basic_block(self.curr_fn(), "");
+                    let else_block = self.context.append_basic_block(self.curr_fn(), "");
+                    self.builder.build_conditional_branch(
+                        cond_value.into_int_value(),
+                        then_block,
+                        else_block,
+                    );
+
+                    self.builder.position_at_end(then_block);
+                    let then_value = self.emit_expr(then);
+                    branches.push((then_block, then_value));
+
+                    self.builder.position_at_end(else_block);
+                }
+
+                let else_value = if let Some(expr) = els {
+                    self.emit_expr(expr)
+                } else {
+                    self.unit_value()
+                };
+
+                let else_block = self
+                    .builder
+                    .get_insert_block()
+                    .expect("should be pointing at a block");
+                branches.push((else_block, else_value));
+
+                let after_block = self.context.append_basic_block(self.curr_fn(), "");
+                self.builder.position_at_end(after_block);
+                let phi = self
+                    .builder
+                    .build_phi(self.ty_to_ll_ty(expr.ty.get().expect("type")), "");
+
+                for (block, value) in &branches {
+                    self.builder.position_at_end(*block);
+                    self.builder.build_unconditional_branch(after_block);
+                    phi.add_incoming(&[(value as &dyn BasicValue, *block)]);
+                }
+
+                self.builder.position_at_end(after_block);
+
+                phi.as_basic_value()
+            }
         }
+    }
+
+    fn emit_simple_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> BasicValueEnum<'ctx> {
+        let lhs_value = self.emit_expr(lhs);
+        let rhs_value = self.emit_expr(rhs);
+
+        match op {
+            BinOpKind::Plus => self
+                .builder
+                .build_int_add(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                .into(),
+            BinOpKind::Minus => self
+                .builder
+                .build_int_sub(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                .into(),
+            BinOpKind::Star => todo!(),
+            BinOpKind::Slash => todo!(),
+            BinOpKind::Percent => todo!(),
+            BinOpKind::Caret => todo!(),
+            BinOpKind::Amp => todo!(),
+            BinOpKind::Pipe => todo!(),
+            BinOpKind::AmpAmp => todo!(),
+            BinOpKind::PipePipe => todo!(),
+            BinOpKind::Lt => todo!(),
+            BinOpKind::LtLt => todo!(),
+            BinOpKind::Le => todo!(),
+            BinOpKind::Gt => todo!(),
+            BinOpKind::GtGt => todo!(),
+            BinOpKind::Ge => todo!(),
+            BinOpKind::EqEq => self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    lhs_value.into_int_value(),
+                    rhs_value.into_int_value(),
+                    "",
+                )
+                .into(),
+            BinOpKind::Ne => todo!(),
+        }
+    }
+
+    fn build_struct(&mut self, name: &str, inits: &[(&str, &Expr)]) -> BasicValueEnum<'ctx> {
+        let info = *self.struct_infos.get(name).expect("die!!!");
+        let mut struct_value = self
+            .module
+            .get_struct_type(name)
+            .expect("ICE: struct ll ty should be present")
+            .get_undef();
+        for (init_name, expr) in inits.iter() {
+            let value = self.emit_expr(expr);
+            let i = info.member_index(init_name);
+            struct_value = self
+                .builder
+                .build_insert_value(struct_value, value, i as u32, "")
+                .expect("struct index oob")
+                .into_struct_value();
+        }
+        struct_value.into()
     }
 
     /// Creates a new stack allocation instruction in the entry block of the function.
@@ -271,7 +439,14 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 let tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
                 context.struct_type(tys.as_slice(), false).into()
             }
-            tyck::Type::Fn(_, _) => todo!(),
+            tyck::Type::Fn(params, return_type) => {
+                let ll_return_type = self.ty_to_ll_ty(*return_type);
+                let ll_param_types: Vec<_> = params.iter().map(|p| self.ty_to_ll_ty(*p)).collect();
+                ll_return_type
+                    .fn_type(&ll_param_types, false)
+                    .ptr_type(AddressSpace::Generic)
+                    .into()
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 use lalrpop_util::ParseError;
 use std::cell::Cell;
-use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, LetDeclInfo, Operator::{self, *}, BinOpKind, PrefixOpKind, Field};
+use super::ast::{self, Spanned, Expr, ExprKind, Type, Stmt, Defn, DeclInfo, Operator::{self, *}, BinOpKind, PrefixOpKind, Field};
 use super::result;
 use crate::util::{FileId, Span};
 use bumpalo::Bump;
@@ -42,7 +42,7 @@ AtomicExpr: Expr<'b> = {
         }
     },
     BoolExpr,
-    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None)), <>),
+    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None), Cell::new(false)), <>),
     Spanned<Int> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Int(s), <>),
     Spanned<Float> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Float(s), <>),
     Spanned<Char> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Char(s), <>),
@@ -200,17 +200,17 @@ DeclInfo: DeclInfo<'b> = {
             mutable: m.is_some(),
             name,
             ty: Cell::new(None),
-            ty_ast,
+            ty_ast: Some(ty_ast),
             span: Span::new(file_id, l, r),
             id: Cell::new(None),
         }
     },
 };
 
-LetDeclInfo: LetDeclInfo<'b> = {
+LetDeclInfo: DeclInfo<'b> = {
     <l:@L> <m:"mut"?> <name:Spanned<Id>> <ty_ast:(":" <Type>)?> <r:@R> => {
         let name = name.map(|name| &*bump.alloc_str(name));
-        LetDeclInfo {
+        DeclInfo {
             mutable: m.is_some(),
             name,
             ty: Cell::new(None),
@@ -294,7 +294,7 @@ AssignOp: Operator = {
 };
 
 FieldExpr: Spanned<Field<'b>> = {
-    Spanned<Id> => <>.map(|id| Field::Name(bump.alloc_str(id))),
+    Spanned<Id> => <>.map(|id| Field::Name(bump.alloc_str(id), Cell::new(None))),
     Spanned<Int> => <>.map(|id| Field::Index(bump.alloc_str(id))),
 }
 

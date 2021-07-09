@@ -49,28 +49,6 @@ pub struct DeclInfo<'a> {
     pub ty: Cell<Option<tyck::Type<'a>>>,
 
     /// The type ascription AST.
-    pub ty_ast: Type<'a>,
-
-    /// The source span of the declaration.
-    pub span: Span,
-
-    /// Unique identifier for this variable, given in tyck phase.
-    pub id: Cell<Option<VarId>>,
-}
-
-/// Contains the information for a variable declaration.
-#[derive(Debug)]
-pub struct LetDeclInfo<'a> {
-    /// The mutability of the variable.
-    pub mutable: bool,
-
-    /// The variable name.
-    pub name: Spanned<&'a str>,
-
-    /// The type of the variable, given in tyck phase.
-    pub ty: Cell<Option<tyck::Type<'a>>>,
-
-    /// The type ascription AST.
     pub ty_ast: Option<Type<'a>>,
 
     /// The source span of the declaration.
@@ -94,7 +72,7 @@ pub enum DefnKind<'a> {
         body: Expr<'a>,
     },
     Static {
-        decl: LetDeclInfo<'a>,
+        decl: DeclInfo<'a>,
         expr: Expr<'a>,
     },
 }
@@ -107,7 +85,7 @@ pub struct Defn<'a> {
 
 #[derive(Debug)]
 pub enum StmtKind<'a> {
-    Let(LetDeclInfo<'a>, Expr<'a>),
+    Let(DeclInfo<'a>, Expr<'a>),
     Expr(Expr<'a>),
     Semi(Expr<'a>),
 }
@@ -129,7 +107,7 @@ pub enum ExprKind<'a> {
     Tuple(&'a [Expr<'a>]),
     Array(&'a [Expr<'a>], Option<Spanned<usize>>),
 
-    Id(&'a str, Cell<Option<VarId>>),
+    Id(&'a str, Cell<Option<VarId>>, Cell<bool>),
 
     PrefixOp(Spanned<PrefixOpKind>, &'a Expr<'a>),
     BinOp(Spanned<Operator>, &'a Expr<'a>, &'a Expr<'a>),
@@ -201,8 +179,17 @@ pub enum PrefixOpKind {
 
 #[derive(Debug)]
 pub enum Field<'a> {
-    Name(&'a str),
+    Name(&'a str, Cell<Option<usize>>),
     Index(&'a str),
+}
+
+impl<'a> Field<'a> {
+    pub fn get_index(&self) -> usize {
+        match self {
+            Field::Name(_, i) => i.get().expect("index should be there"),
+            Field::Index(i) => i.parse().expect("index should be int"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -478,7 +465,7 @@ pub fn make_let_stmt<'b, 'input>(
     _: &'b Bump,
     file_id: FileId,
     start: usize,
-    decl_info: LetDeclInfo<'b>,
+    decl_info: DeclInfo<'b>,
     expr: Expr<'b>,
     end: usize,
 ) -> Stmt<'b> {
@@ -589,7 +576,11 @@ pub fn make_fn_defn<'b, 'input>(
     end: usize,
 ) -> Defn<'b> {
     let params = bump.alloc_slice_fill_iter(params);
-    let param_tys = bump.alloc_slice_fill_iter(params.iter().map(|decl| decl.ty_ast));
+    let param_tys = bump.alloc_slice_fill_iter(
+        params
+            .iter()
+            .map(|decl| decl.ty_ast.expect("param types should be given")),
+    );
     let return_type = bump.alloc(return_type);
     let span = Span::new(file_id, start, end);
 
@@ -599,10 +590,10 @@ pub fn make_fn_defn<'b, 'input>(
         mutable: false,
         name,
         ty: Cell::new(None),
-        ty_ast: Type {
+        ty_ast: Some(Type {
             kind: TypeKind::Fn(param_tys, return_type),
             span,
-        },
+        }),
         span: name_span,
         id: Cell::new(None),
     };
@@ -623,7 +614,7 @@ pub fn make_static_defn<'b, 'input>(
     _: &'b Bump,
     file_id: FileId,
     start: usize,
-    decl: LetDeclInfo<'b>,
+    decl: DeclInfo<'b>,
     expr: Expr<'b>,
     end: usize,
 ) -> Defn<'b> {

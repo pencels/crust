@@ -13,11 +13,16 @@ struct RangeTo {
 
 struct RangeFull {}
 
-struct Foo {
-    bar: int,
-    bar: int,
+fn fib(i: int) -> int {
+    if i == 0 {
+        0
+    } else if i == 1 {
+        1
+    } else {
+        fib(i - 1) + fib(i - 2)
+    }
 }
 
-fn main(i: int, j: int) -> Foo {
-    Foo { bar: j, baz: i }
+fn main() -> int {
+    fib(25)
 }

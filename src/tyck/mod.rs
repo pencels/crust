@@ -8,7 +8,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use std::str::FromStr;
 
-use crate::parser::ast::Operator;
+use crate::parser::ast::{DeclInfo, Operator};
 use crate::{
     parser::ast::{BinOpKind, ExprKind, Field, PrefixOpKind, Spanned, Stmt, StmtKind},
     util::Span,
@@ -21,10 +21,10 @@ use crate::{
     util::fresh_id,
 };
 
-const RANGE_TY_NAME: &str = "Range";
-const RANGE_TO_TY_NAME: &str = "RangeTo";
-const RANGE_FROM_TY_NAME: &str = "RangeFrom";
-const RANGE_FULL_TY_NAME: &str = "RangeFull";
+pub const RANGE_TY_NAME: &str = "Range";
+pub const RANGE_TO_TY_NAME: &str = "RangeTo";
+pub const RANGE_FROM_TY_NAME: &str = "RangeFrom";
+pub const RANGE_FULL_TY_NAME: &str = "RangeFull";
 
 enum Source {
     Id(Span),
@@ -34,7 +34,7 @@ enum Source {
 #[derive(Debug, Clone, Copy)]
 pub struct StructInfo<'a> {
     pub name: &'a Spanned<&'a str>,
-    pub members: &'a [DeclInfo<'a>],
+    pub members: &'a [&'a DeclInfo<'a>],
 }
 
 impl<'a> StructInfo<'a> {
@@ -50,58 +50,6 @@ impl<'a> StructInfo<'a> {
                 }
             })
             .expect("ICE: tried to find index of a struct member but died trying")
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DeclInfo<'a> {
-    /// The mutability of the variable.
-    pub mutable: bool,
-
-    /// The variable name.
-    pub name: Spanned<&'a str>,
-
-    /// The type of the variable, given in tyck phase.
-    pub ty: Type<'a>,
-
-    /// The type ascription span.
-    pub ty_span: Option<Span>,
-
-    /// The source span of the declaration.
-    pub span: Span,
-
-    /// Unique identifier for this variable, given in tyck phase.
-    pub id: VarId,
-}
-
-impl<'a> DeclInfo<'a> {
-    pub fn from<'alloc, 'check>(
-        checker: &'check TypeChecker<'alloc>,
-        decl: &'alloc ast::DeclInfo<'alloc>,
-    ) -> TyckResult<DeclInfo<'alloc>> {
-        Ok(DeclInfo {
-            id: fresh_id(),
-            mutable: decl.mutable,
-            name: decl.name.map(|name| &*checker.bump.alloc_str(name)),
-            span: decl.span,
-            ty: Type::from(checker, &decl.ty_ast)?,
-            ty_span: Some(decl.ty_ast.span),
-        })
-    }
-
-    pub fn from_let<'alloc>(
-        checker: &TypeChecker<'alloc>,
-        decl: &'alloc ast::LetDeclInfo<'alloc>,
-        ty: Type<'alloc>,
-    ) -> DeclInfo<'alloc> {
-        DeclInfo {
-            id: fresh_id(),
-            mutable: decl.mutable,
-            name: decl.name.map(|name| &*checker.bump.alloc_str(name)),
-            span: decl.span,
-            ty,
-            ty_span: decl.ty_ast.map(|ast| ast.span),
-        }
     }
 }
 
@@ -411,8 +359,9 @@ fn deref_place_until<'alloc, T>(
 }
 
 pub struct TypeChecker<'alloc> {
-    pub var_decl: HashMap<VarId, DeclInfo<'alloc>>,
+    pub var_decl: HashMap<VarId, &'alloc DeclInfo<'alloc>>,
     pub struct_tys: HashMap<&'alloc str, StructInfo<'alloc>>,
+    pub func_decl: HashMap<&'alloc str, &'alloc DeclInfo<'alloc>>,
     pub bump: &'alloc Bump,
     pub env: Env<'alloc>,
 }
@@ -422,6 +371,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         TypeChecker {
             var_decl: hashmap! {},
             struct_tys: hashmap! {},
+            func_decl: hashmap! {},
             bump,
             env: Env::new(),
         }
@@ -444,8 +394,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                             } else {
                                 seen_members.insert(mem.name.item(), mem.name.span());
                             }
-                            let decl = DeclInfo::from(self, mem)?;
-                            Ok(decl)
+                            mem.ty.set(Some(Type::from(
+                                self,
+                                &mem.ty_ast.expect("struct members should have types"),
+                            )?));
+                            Ok(mem)
                         })
                         .collect();
                     let members = self.bump.alloc_slice_fill_iter(members?);
@@ -459,12 +412,15 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     );
                 }
                 DefnKind::Fn { decl, .. } => {
-                    let decl = DeclInfo::from(self, decl)?;
-                    self.register_decl(decl);
+                    decl.ty.set(Some(Type::from(
+                        self,
+                        &decl.ty_ast.expect("fn decls should have types"),
+                    )?));
+                    self.func_decl.insert(decl.name.item(), decl);
                 }
                 DefnKind::Static { decl, expr } => {
                     let expr_ty = self.tyck_expr(expr)?;
-                    let decl = DeclInfo::from_let(self, decl, expr_ty);
+                    decl.ty.set(Some(expr_ty));
                     self.register_decl(decl);
                 }
             }
@@ -490,25 +446,16 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 return_ty_ast: return_type,
                 return_ty,
                 body,
-            } => {
-                let params: TyckResult<Vec<_>> = params
-                    .iter()
-                    .map(|param| {
-                        let decl = DeclInfo::from(self, param)?;
-                        param.ty.set(Some(decl.ty));
-                        Ok(decl)
-                    })
-                    .collect();
-                let params = self.bump.alloc_slice_fill_iter(params?);
-                self.tyck_fn(&decl.name, params, return_type, &return_ty, body)
-            }
+            } => self.tyck_fn(&decl.name, params, return_type, &return_ty, body),
             DefnKind::Static { decl, expr } => todo!(),
         }
     }
 
-    fn register_decl(&mut self, decl: DeclInfo<'alloc>) {
-        self.var_decl.insert(decl.id, decl);
-        self.env.set(decl.name.item(), decl.id);
+    fn register_decl(&mut self, decl: &'alloc DeclInfo<'alloc>) {
+        let id = fresh_id();
+        decl.id.set(Some(id));
+        self.var_decl.insert(id, decl);
+        self.env.set(decl.name.item(), id);
     }
 
     fn tyck_fn(
@@ -524,12 +471,18 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             kind => unreachable!("ICE: fn has a non-block body: {:?}", kind),
         };
 
+        self.env.push();
         for param in params {
-            self.register_decl(*param);
+            param.ty.set(Some(Type::from(
+                self,
+                &param.ty_ast.expect("fn params always have a type"),
+            )?));
+            self.register_decl(param);
         }
 
         let return_ty = return_ty_ast.map_or(Ok(Type::Tuple(&[])), |t| Type::from(self, &t))?;
         let body_ty = self.tyck_block(stmts)?;
+        self.env.pop();
 
         return_ty_cell.set(Some(return_ty));
 
@@ -586,18 +539,9 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     todo!("ummmmm no zero length arrays pls");
                 }
             }
-            ExprKind::Id(name, id) => {
-                if let Some(lookup_id) = self.env.get(name) {
-                    // Inject id from looking up in the env
-                    id.set(Some(lookup_id));
-                    let decl = self
-                        .var_decl
-                        .get(&lookup_id)
-                        .expect("ICE: var id in env was not in the var_decl map");
-                    Ok(decl.ty)
-                } else {
-                    Err(TyckError::UndefinedVar { span: expr.span })
-                }
+            ExprKind::Id(name, id, is_func) => {
+                let decl = self.tyck_var(name, id, is_func, expr.span)?;
+                Ok(decl.ty.get().expect("type"))
             }
             ExprKind::PrefixOp(op, expr) => self.tyck_prefix_op_expr(*op, expr),
             ExprKind::BinOp(Spanned(s, Operator::Simple(op)), lhs, rhs) => {
@@ -683,7 +627,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         Some(&decl) => {
                             let expr_ty = self.tyck_expr(expr)?;
                             tyck_assign(
-                                Spanned(*field_name_span, &decl.ty),
+                                Spanned(*field_name_span, &decl.ty.get().expect("type")),
                                 Spanned(expr.span, &expr_ty),
                             )?;
                             unused.remove(field_name);
@@ -752,6 +696,30 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         expr.ty.set(Some(ty));
 
         Ok(ty)
+    }
+
+    fn tyck_var(
+        &self,
+        name: &str,
+        id: &Cell<Option<usize>>,
+        is_func: &Cell<bool>,
+        span: Span,
+    ) -> TyckResult<&'alloc DeclInfo<'alloc>> {
+        if let Some(lookup_id) = self.env.get(name) {
+            // Inject id from looking up in the env
+            id.set(Some(lookup_id));
+            let decl = self
+                .var_decl
+                .get(&lookup_id)
+                .expect("ICE: var id in env was not in the var_decl map");
+            is_func.set(false);
+            Ok(decl)
+        } else if let Some(decl) = self.func_decl.get(name) {
+            is_func.set(true);
+            Ok(decl)
+        } else {
+            Err(TyckError::UndefinedVar { span })
+        }
     }
 
     fn tyck_assign_expr(
@@ -1002,18 +970,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         expr: &'alloc Expr<'alloc>,
     ) -> TyckResult<(bool, Option<Source>, Type<'alloc>)> {
         match &expr.kind {
-            ExprKind::Id(name, id) => {
-                if let Some(lookup_id) = self.env.get(name) {
-                    // Inject id from looking up in the env
-                    id.set(Some(lookup_id));
-                    let decl = self
-                        .var_decl
-                        .get(&lookup_id)
-                        .expect("ICE: var id in env was not in the var_decl map");
-                    Ok((decl.mutable, Some(Source::Id(decl.name.span())), decl.ty))
-                } else {
-                    return Err(TyckError::UndefinedVar { span: expr.span });
-                }
+            ExprKind::Id(name, id, is_func) => {
+                let decl = self.tyck_var(name, id, is_func, expr.span)?;
+                Ok((
+                    decl.mutable,
+                    Some(Source::Id(decl.name.span())),
+                    decl.ty.get().expect("type"),
+                ))
             }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
                 let expr_ty = self.tyck_expr(expr)?;
@@ -1058,7 +1021,14 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         match expr_ty {
             Type::Struct(struct_name) => {
                 let field_name = match field {
-                    Field::Name(x) => x,
+                    Field::Name(x, i) => {
+                        let info = self
+                            .struct_tys
+                            .get(struct_name)
+                            .expect("ICE: struct should be known");
+                        i.set(Some(info.member_index(x)));
+                        x
+                    }
                     _ => {
                         return Err(TyckError::NoIndexFieldsOnStructs {
                             span: *field_span,
@@ -1077,7 +1047,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     .iter()
                     .find(|decl| decl.name.item() == field_name)
                 {
-                    Some(decl) => Ok(decl.ty),
+                    Some(decl) => Ok(decl.ty.get().expect("type")),
                     _ => Err(TyckError::FieldDoesntExistOnStruct {
                         field: *field_span,
                         field_name: field_name.to_string(),
@@ -1099,7 +1069,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         })
                     }
                 }
-                Field::Name(_) => Err(TyckError::NoNamedFieldsOnTuples {
+                Field::Name(..) => Err(TyckError::NoNamedFieldsOnTuples {
                     span: *field_span,
                     ty: human_type_name(&expr_ty),
                 }),
@@ -1141,7 +1111,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
     fn tyck_let(
         &mut self,
-        decl: &'alloc ast::LetDeclInfo<'alloc>,
+        decl: &'alloc ast::DeclInfo<'alloc>,
         expr: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
         let ty = self.tyck_expr(expr)?;
@@ -1151,10 +1121,9 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         };
 
         decl.ty.set(Some(decl_ty));
+        self.register_decl(decl);
 
         tyck_assign(Spanned(decl.name.span(), &decl_ty), Spanned(expr.span, &ty))?;
-        let decl = DeclInfo::from_let(self, decl, ty);
-        self.register_decl(decl);
         Ok(())
     }
 }

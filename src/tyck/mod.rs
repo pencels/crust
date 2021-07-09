@@ -59,10 +59,10 @@ pub struct DeclInfo<'a> {
 }
 
 impl<'a> DeclInfo<'a> {
-    pub fn from<'ast, 'check, 'bump>(
-        checker: &'check TypeChecker<'bump>,
-        decl: &'ast ast::DeclInfo<'ast>,
-    ) -> TyckResult<DeclInfo<'bump>> {
+    pub fn from<'alloc, 'check>(
+        checker: &'check TypeChecker<'alloc>,
+        decl: &'alloc ast::DeclInfo<'alloc>,
+    ) -> TyckResult<DeclInfo<'alloc>> {
         Ok(DeclInfo {
             id: fresh_id(),
             mutable: decl.mutable,
@@ -73,11 +73,11 @@ impl<'a> DeclInfo<'a> {
         })
     }
 
-    pub fn from_let<'ast, 'bump>(
-        checker: &TypeChecker<'bump>,
-        decl: &'ast ast::LetDeclInfo<'ast>,
-        ty: Type<'bump>,
-    ) -> DeclInfo<'bump> {
+    pub fn from_let<'alloc>(
+        checker: &TypeChecker<'alloc>,
+        decl: &'alloc ast::LetDeclInfo<'alloc>,
+        ty: Type<'alloc>,
+    ) -> DeclInfo<'alloc> {
         DeclInfo {
             id: fresh_id(),
             mutable: decl.mutable,
@@ -274,12 +274,12 @@ fn tyck_assign(
     }
 }
 
-fn indexed_ty<'bump>(
-    lhs_ty: Type<'bump>,
+fn indexed_ty<'alloc>(
+    lhs_ty: Type<'alloc>,
     lhs_span: Span,
     index_ty: Type,
     index_span: Span,
-) -> TyckResult<Type<'bump>> {
+) -> TyckResult<Type<'alloc>> {
     let elem_ty = match lhs_ty {
         Type::Slice(ty) => ty,
         Type::Array(ty, _) => ty,
@@ -394,15 +394,15 @@ fn deref_place_until<'alloc, T>(
     )
 }
 
-pub struct TypeChecker<'bump> {
-    pub var_decl: HashMap<VarId, DeclInfo<'bump>>,
-    pub struct_tys: HashMap<&'bump str, StructInfo<'bump>>,
-    pub bump: &'bump Bump,
-    pub env: Env<'bump>,
+pub struct TypeChecker<'alloc> {
+    pub var_decl: HashMap<VarId, DeclInfo<'alloc>>,
+    pub struct_tys: HashMap<&'alloc str, StructInfo<'alloc>>,
+    pub bump: &'alloc Bump,
+    pub env: Env<'alloc>,
 }
 
-impl<'check, 'bump> TypeChecker<'bump> {
-    pub fn new(bump: &'bump Bump) -> TypeChecker<'bump> {
+impl<'check, 'alloc> TypeChecker<'alloc> {
+    pub fn new(bump: &'alloc Bump) -> TypeChecker<'alloc> {
         TypeChecker {
             var_decl: hashmap! {},
             struct_tys: hashmap! {},
@@ -411,10 +411,7 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    pub fn tyck_program<'ast>(&mut self, program: &'ast Vec<Defn<'ast>>) -> TyckResult<()>
-    where
-        'ast: 'bump,
-    {
+    pub fn tyck_program(&mut self, program: &'alloc Vec<Defn<'alloc>>) -> TyckResult<()> {
         // Register all the definition declarations first before doing a full typecheck.
         for defn in program {
             match &defn.kind {
@@ -453,10 +450,7 @@ impl<'check, 'bump> TypeChecker<'bump> {
         Ok(())
     }
 
-    fn tyck_defn<'ast>(&mut self, defn: &'ast Defn<'ast>) -> TyckResult<()>
-    where
-        'ast: 'bump,
-    {
+    fn tyck_defn(&mut self, defn: &'alloc Defn<'alloc>) -> TyckResult<()> {
         match &defn.kind {
             DefnKind::Struct { .. } => {
                 // Structs registered in 1st pass, nothing needs to be done here.
@@ -479,17 +473,17 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn register_decl<'ast>(&mut self, decl: DeclInfo<'bump>) {
+    fn register_decl(&mut self, decl: DeclInfo<'alloc>) {
         self.var_decl.insert(decl.id, decl);
         self.env.set(decl.name.item(), decl.id);
     }
 
-    fn tyck_fn<'ast>(
+    fn tyck_fn(
         &mut self,
-        name: &Spanned<&'bump str>,
-        params: &'bump [DeclInfo<'bump>],
-        return_ty_ast: &'ast Option<ast::Type<'ast>>,
-        body: &'ast Expr<'ast>,
+        name: &Spanned<&'alloc str>,
+        params: &'alloc [DeclInfo<'alloc>],
+        return_ty_ast: &'alloc Option<ast::Type<'alloc>>,
+        body: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
         let stmts = match &body.kind {
             ExprKind::Block(stmts) => stmts,
@@ -514,7 +508,7 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_expr<'ast>(&mut self, expr: &'ast Expr<'ast>) -> TyckResult<Type<'bump>> {
+    fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
         match &expr.kind {
             ExprKind::Bool(_) => Ok(Type::Bool),
             ExprKind::Int(_) => Ok(Type::Int),
@@ -720,12 +714,12 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_assign_expr<'ast>(
+    fn tyck_assign_expr(
         &mut self,
         op: Spanned<Option<BinOpKind>>,
-        lhs: &'ast Expr<'ast>,
-        rhs: &'ast Expr<'ast>,
-    ) -> TyckResult<Type<'bump>> {
+        lhs: &'alloc Expr<'alloc>,
+        rhs: &'alloc Expr<'alloc>,
+    ) -> TyckResult<Type<'alloc>> {
         let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
 
         if !mutable {
@@ -779,12 +773,12 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_simple_binop_types<'ast>(
+    fn tyck_simple_binop_types(
         &mut self,
         op: Spanned<BinOpKind>,
-        Spanned(lhs_span, lhs_ty): Spanned<Type<'bump>>,
-        Spanned(rhs_span, rhs_ty): Spanned<Type<'bump>>,
-    ) -> TyckResult<Type<'bump>> {
+        Spanned(lhs_span, lhs_ty): Spanned<Type<'alloc>>,
+        Spanned(rhs_span, rhs_ty): Spanned<Type<'alloc>>,
+    ) -> TyckResult<Type<'alloc>> {
         let Spanned(op_span, op) = op;
         match op {
             // Additive operations
@@ -901,22 +895,22 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_simple_binop_expr<'ast>(
+    fn tyck_simple_binop_expr(
         &mut self,
         op: Spanned<BinOpKind>,
-        lhs: &'ast Expr<'ast>,
-        rhs: &'ast Expr<'ast>,
-    ) -> TyckResult<Type<'bump>> {
+        lhs: &'alloc Expr<'alloc>,
+        rhs: &'alloc Expr<'alloc>,
+    ) -> TyckResult<Type<'alloc>> {
         let lhs_ty = self.tyck_expr(lhs)?;
         let rhs_ty = self.tyck_expr(rhs)?;
         self.tyck_simple_binop_types(op, Spanned(lhs.span, lhs_ty), Spanned(rhs.span, rhs_ty))
     }
 
-    fn tyck_prefix_op_expr<'ast>(
+    fn tyck_prefix_op_expr(
         &mut self,
         Spanned(op_span, op): Spanned<PrefixOpKind>,
-        expr: &'ast Expr<'ast>,
-    ) -> TyckResult<Type<'bump>> {
+        expr: &'alloc Expr<'alloc>,
+    ) -> TyckResult<Type<'alloc>> {
         let ty = self.tyck_expr(expr)?;
         match op {
             PrefixOpKind::Tilde => {
@@ -963,10 +957,10 @@ impl<'check, 'bump> TypeChecker<'bump> {
     }
 
     /// Typechecks an expr, expecting it to be a "place" or "lval" expr - one that indicates a memory location.
-    fn tyck_place_expr<'ast>(
+    fn tyck_place_expr(
         &mut self,
-        expr: &'ast Expr<'ast>,
-    ) -> TyckResult<(bool, Option<Source>, Type<'bump>)> {
+        expr: &'alloc Expr<'alloc>,
+    ) -> TyckResult<(bool, Option<Source>, Type<'alloc>)> {
         match &expr.kind {
             ExprKind::Id(name, id) => {
                 if let Some(lookup_id) = self.env.get(name) {
@@ -1016,11 +1010,11 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn field_access_ty<'ast>(
+    fn field_access_ty(
         &mut self,
-        Spanned(expr_span, expr_ty): Spanned<Type<'bump>>,
+        Spanned(expr_span, expr_ty): Spanned<Type<'alloc>>,
         Spanned(field_span, field): &Spanned<Field>,
-    ) -> TyckResult<Type<'bump>> {
+    ) -> TyckResult<Type<'alloc>> {
         match expr_ty {
             Type::Struct(struct_name) => {
                 let field_name = match field {
@@ -1077,7 +1071,7 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_block<'ast>(&mut self, stmts: &'ast [Stmt<'ast>]) -> TyckResult<Type<'bump>> {
+    fn tyck_block(&mut self, stmts: &'alloc [Stmt<'alloc>]) -> TyckResult<Type<'alloc>> {
         self.env.push();
         let result = if let Some((last, init)) = stmts.split_last() {
             for stmt in init {
@@ -1091,7 +1085,7 @@ impl<'check, 'bump> TypeChecker<'bump> {
         result
     }
 
-    fn tyck_stmt<'ast>(&mut self, stmt: &'ast Stmt<'ast>) -> TyckResult<Type<'bump>> {
+    fn tyck_stmt(&mut self, stmt: &'alloc Stmt<'alloc>) -> TyckResult<Type<'alloc>> {
         match &stmt.kind {
             StmtKind::Let(decl, expr) => {
                 self.tyck_let(decl, expr)?;
@@ -1105,16 +1099,18 @@ impl<'check, 'bump> TypeChecker<'bump> {
         }
     }
 
-    fn tyck_let<'ast>(
+    fn tyck_let(
         &mut self,
-        decl: &'ast ast::LetDeclInfo<'ast>,
-        expr: &'ast Expr<'ast>,
+        decl: &'alloc ast::LetDeclInfo<'alloc>,
+        expr: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
         let ty = self.tyck_expr(expr)?;
         let decl_ty = match &decl.ty_ast {
             Some(decl_ty_ast) => Type::from(self, decl_ty_ast)?,
             None => ty,
         };
+
+        decl.ty.set(Some(decl_ty));
 
         tyck_assign(Spanned(decl.name.span(), &decl_ty), Spanned(expr.span, &ty))?;
         let decl = DeclInfo::from_let(self, decl, ty);

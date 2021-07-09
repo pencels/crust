@@ -18,3 +18,4 @@ maplit = "1.0.2"
 lookahead = "0.1.0"
 codespan-reporting = "0.11.1"
 codespan-derive = { git = "https://github.com/compiler-errors/codespan-derive", branch = "trunk" }
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm11-0"] }

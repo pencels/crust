@@ -1,2 +1,4 @@
 /target
 /src/parser/grammar.rs
+*.ll
+a.out

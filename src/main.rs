@@ -1,11 +1,12 @@
 #![feature(nll)]
 
+mod gen;
 mod lexer;
 mod parser;
 mod tyck;
 mod util;
 
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, path::Path};
 
 use bumpalo::Bump;
 use codespan_derive::IntoDiagnostic;
@@ -16,6 +17,7 @@ use codespan_reporting::{
         termcolor::{ColorChoice, StandardStream},
     },
 };
+use gen::Emitter;
 use lalrpop_util::{self, lexer::Token};
 use parser::result::ParseError;
 use parser::{ast::Defn, grammar::ProgramParser, result};
@@ -32,7 +34,7 @@ fn parse_file<'a>(
 }
 
 fn main() {
-    let path = "examples/test.crust";
+    let path = Path::new("examples/test.crust");
     let mut file = File::open(path).unwrap();
     let mut buf = String::new();
     file.read_to_string(&mut buf).unwrap();
@@ -40,7 +42,7 @@ fn main() {
     let bump = Bump::new();
     let mut files: SimpleFiles<String, String> = SimpleFiles::new();
 
-    let file_id = files.add(path.to_string(), buf.clone());
+    let file_id = files.add(path.as_os_str().to_string_lossy().into_owned(), buf.clone());
 
     let program = match parse_file(&bump, file_id, &buf) {
         Ok(program) => program,
@@ -57,7 +59,6 @@ fn main() {
         }
     };
 
-    let bump = Bump::new();
     let mut checker = tyck::TypeChecker::new(&bump);
     match checker.tyck_program(&program) {
         Ok(_) => (),
@@ -71,4 +72,7 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    let filename = path.file_stem().unwrap().to_string_lossy();
+    Emitter::emit_program(&filename, &program);
 }

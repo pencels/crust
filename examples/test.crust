@@ -13,7 +13,11 @@ struct RangeTo {
 
 struct RangeFull {}
 
-fn main() -> int {
-    let x = 200;
-    x
+struct Foo {
+    bar: int,
+    bar: int,
+}
+
+fn main(i: int, j: int) -> Foo {
+    Foo { bar: j, baz: i }
 }

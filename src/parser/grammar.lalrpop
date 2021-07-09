@@ -38,6 +38,7 @@ AtomicExpr: Expr<'b> = {
         Expr {
             kind: ExprKind::Group(bump.alloc(e)),
             span: Span::new(file_id, l, r),
+            ty: Cell::new(None),
         }
     },
     BoolExpr,

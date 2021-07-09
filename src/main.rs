@@ -74,5 +74,5 @@ fn main() {
     }
 
     let filename = path.file_stem().unwrap().to_string_lossy();
-    Emitter::emit_program(&filename, &program);
+    Emitter::emit_program(&filename, &program, checker.struct_tys);
 }

@@ -89,7 +89,8 @@ pub enum DefnKind<'a> {
     Fn {
         decl: DeclInfo<'a>,
         params: &'a [DeclInfo<'a>],
-        return_type: &'a Option<Type<'a>>,
+        return_ty_ast: &'a Option<Type<'a>>,
+        return_ty: Cell<Option<tyck::Type<'a>>>,
         body: Expr<'a>,
     },
     Static {
@@ -150,6 +151,7 @@ pub enum ExprKind<'a> {
 pub struct Expr<'a> {
     pub span: Span,
     pub kind: ExprKind<'a>,
+    pub ty: Cell<Option<tyck::Type<'a>>>,
 }
 
 #[derive(Debug)]
@@ -230,6 +232,7 @@ pub fn make_spanned_expr<'b>(
     Expr {
         kind,
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -247,6 +250,7 @@ where
     Expr {
         kind: kind(s),
         span,
+        ty: Cell::new(None),
     }
 }
 
@@ -261,6 +265,7 @@ pub fn make_prefix_op_expr<'b>(
     Expr {
         kind: ExprKind::PrefixOp(op, e),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -276,6 +281,7 @@ pub fn make_binop_expr<'b>(
     Expr {
         kind: ExprKind::BinOp(op, e1, e2),
         span: e1.span.unite(e2.span),
+        ty: Cell::new(None),
     }
 }
 
@@ -291,6 +297,7 @@ pub fn make_cast_expr<'b, 'input>(
     Expr {
         kind: ExprKind::Cast(expr, ty),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -307,6 +314,7 @@ pub fn make_call_expr<'b>(
     Expr {
         kind: ExprKind::Call(callee, args),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -323,6 +331,7 @@ pub fn make_index_expr<'b>(
     Expr {
         kind: ExprKind::Index(lhs, index, Cell::new(0)),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -341,6 +350,7 @@ pub fn make_range_expr<'b, 'input>(
             .map(|s| s.span)
             .unwrap_or(op.span())
             .unite(end.map(|e| e.span).unwrap_or(op.span())),
+        ty: Cell::new(None),
     }
 }
 
@@ -356,6 +366,7 @@ pub fn make_block_expr<'b>(
     Expr {
         kind: ExprKind::Block(stmts),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -370,6 +381,7 @@ pub fn make_tuple_expr<'b>(
     Expr {
         kind: ExprKind::Tuple(exprs),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -393,6 +405,7 @@ pub fn make_array_expr<'b, 'input>(
     Ok(Expr {
         kind: ExprKind::Array(exprs, size),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     })
 }
 
@@ -412,6 +425,7 @@ pub fn make_if_expr<'b>(
     Expr {
         kind: ExprKind::If(inner_ifs, else_block),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -428,6 +442,7 @@ pub fn make_struct_expr<'b, 'input>(
     Expr {
         kind: ExprKind::Struct(id, fields),
         span: Span::new(file_id, start, end),
+        ty: Cell::new(None),
     }
 }
 
@@ -443,6 +458,7 @@ pub fn make_field_expr<'b, 'input>(
     Expr {
         kind: ExprKind::Field(expr, op.span(), field, Cell::new(0)),
         span: expr.span.unite(field_span),
+        ty: Cell::new(None),
     }
 }
 
@@ -595,7 +611,8 @@ pub fn make_fn_defn<'b, 'input>(
         kind: DefnKind::Fn {
             decl,
             params,
-            return_type,
+            return_ty_ast: return_type,
+            return_ty: Cell::new(None),
             body,
         },
         span,

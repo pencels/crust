@@ -179,4 +179,12 @@ pub enum TyckError {
         ptr_span: Span,
         ptr_ty: String,
     },
+
+    #[message = "Struct has duplicate member name"]
+    StructHasDuplicateMember {
+        #[primary = "fix it binch"]
+        duplicate_span: Span,
+        #[secondary = "first declared here"]
+        original_span: Span,
+    },
 }

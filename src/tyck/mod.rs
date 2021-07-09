@@ -33,8 +33,24 @@ enum Source {
 
 #[derive(Debug, Clone, Copy)]
 pub struct StructInfo<'a> {
-    name: &'a Spanned<&'a str>,
-    members: &'a [DeclInfo<'a>],
+    pub name: &'a Spanned<&'a str>,
+    pub members: &'a [DeclInfo<'a>],
+}
+
+impl<'a> StructInfo<'a> {
+    pub fn member_index(&self, name: &str) -> usize {
+        self.members
+            .iter()
+            .enumerate()
+            .find_map(|(i, member)| {
+                if *member.name.item() == name {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .expect("ICE: tried to find index of a struct member but died trying")
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -416,9 +432,21 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         for defn in program {
             match &defn.kind {
                 DefnKind::Struct { name, members } => {
+                    let mut seen_members = HashMap::new();
                     let members: TyckResult<Vec<_>> = members
                         .iter()
-                        .map(|mem| DeclInfo::from(self, mem))
+                        .map(|mem| {
+                            if let Some(original_span) = seen_members.get(mem.name.item()) {
+                                return Err(TyckError::StructHasDuplicateMember {
+                                    duplicate_span: mem.name.span(),
+                                    original_span: *original_span,
+                                });
+                            } else {
+                                seen_members.insert(mem.name.item(), mem.name.span());
+                            }
+                            let decl = DeclInfo::from(self, mem)?;
+                            Ok(decl)
+                        })
                         .collect();
                     let members = self.bump.alloc_slice_fill_iter(members?);
                     let name = name.map(|name| &*self.bump.alloc_str(name));
@@ -459,15 +487,20 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             DefnKind::Fn {
                 decl,
                 params,
-                return_type,
+                return_ty_ast: return_type,
+                return_ty,
                 body,
             } => {
                 let params: TyckResult<Vec<_>> = params
                     .iter()
-                    .map(|param| DeclInfo::from(self, param))
+                    .map(|param| {
+                        let decl = DeclInfo::from(self, param)?;
+                        param.ty.set(Some(decl.ty));
+                        Ok(decl)
+                    })
                     .collect();
                 let params = self.bump.alloc_slice_fill_iter(params?);
-                self.tyck_fn(&decl.name, params, return_type, body)
+                self.tyck_fn(&decl.name, params, return_type, &return_ty, body)
             }
             DefnKind::Static { decl, expr } => todo!(),
         }
@@ -483,6 +516,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         name: &Spanned<&'alloc str>,
         params: &'alloc [DeclInfo<'alloc>],
         return_ty_ast: &'alloc Option<ast::Type<'alloc>>,
+        return_ty_cell: &Cell<Option<Type<'alloc>>>,
         body: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
         let stmts = match &body.kind {
@@ -497,6 +531,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let return_ty = return_ty_ast.map_or(Ok(Type::Tuple(&[])), |t| Type::from(self, &t))?;
         let body_ty = self.tyck_block(stmts)?;
 
+        return_ty_cell.set(Some(return_ty));
+
         if is_assignable(&return_ty, &body_ty) {
             Ok(())
         } else {
@@ -509,7 +545,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     }
 
     fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
-        match &expr.kind {
+        let ty = match &expr.kind {
             ExprKind::Bool(_) => Ok(Type::Bool),
             ExprKind::Int(_) => Ok(Type::Int),
             ExprKind::Float(_) => Ok(Type::Float),
@@ -711,7 +747,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     _ => RANGE_TY_NAME,
                 }))
             }
-        }
+        }?;
+
+        expr.ty.set(Some(ty));
+
+        Ok(ty)
     }
 
     fn tyck_assign_expr(

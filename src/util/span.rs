@@ -39,6 +39,12 @@ impl Span {
         }
     }
 
+    pub fn move_end(mut self, end: usize) -> Span {
+        assert!(end >= self.start);
+        self.end = end;
+        self
+    }
+
     pub fn dummy() -> Span {
         Span {
             file_id: 0,

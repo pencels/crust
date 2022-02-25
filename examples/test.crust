@@ -13,16 +13,26 @@ struct RangeTo {
 
 struct RangeFull {}
 
-fn fib(i: int) -> int {
-    if i == 0 {
-        0
-    } else if i == 1 {
-        1
-    } else {
-        fib(i - 1) + fib(i - 2)
-    }
+extern fn print_int(i: int);
+extern fn print_char(c: char);
+extern fn print(s: *str);
+extern fn print_int_slice(s: *[int]);
+extern fn print_int_ptr(p: *int);
+
+extern fn slice_from_raw_parts(
+    ptr: *(),
+    len: int,
+) -> *[()];
+
+extern fn for_each(slice: *[*()], do: fn(*()));
+
+fn do_something(input: *()) {
+    print_int_ptr(input as *int);
 }
 
 fn main() -> int {
-    fib(25)
+    let nums = [1, 2, 3, 4, 5];
+    let in = &nums[1..];
+    let slice = &(in)[1..];
+    0
 }

@@ -187,4 +187,14 @@ pub enum TyckError {
         #[secondary = "first declared here"]
         original_span: Span,
     },
+
+    #[message = "Cannot cast type"]
+    CannotCastType {
+        #[primary]
+        expr_span: Span,
+        #[secondary]
+        ty_span: Span,
+        from_ty_name: String,
+        to_ty_name: String,
+    },
 }

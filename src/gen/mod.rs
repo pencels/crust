@@ -1,22 +1,32 @@
+use inkwell::types::{BasicTypeEnum, StructType};
+use std::sync::LazyLock;
+use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::{collections::HashMap, path::PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+use std::process::Command;
 
-use inkwell::values::{BasicValue, CallableValue};
+use inkwell::values::{BasicValue, CallableValue, IntValue};
 use inkwell::{
     builder::Builder,
     context::Context,
     module::Module,
-    types::{BasicType, StringRadix, StructType},
+    types::{BasicType, StringRadix},
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
 use inkwell::{AddressSpace, IntPredicate};
 
-use crate::parser::ast::{BinOpKind, Operator, Spanned};
-use crate::tyck::{VarId, RANGE_FROM_TY_NAME, RANGE_FULL_TY_NAME, RANGE_TO_TY_NAME, RANGE_TY_NAME};
-use crate::{
-    parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind, Type},
-    tyck::{self, StructInfo},
+use crate::parser::ast::{BinOpKind, Operator, PrefixOpKind, Spanned};
+use crate::tyck::{
+    Type, VarId, RANGE_FROM_TY_NAME, RANGE_FULL_TY_NAME, RANGE_TO_TY_NAME, RANGE_TY_NAME,
 };
+use crate::{
+    parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind},
+    tyck::StructInfo,
+};
+use tempfile::tempdir;
+
+static STDLIB_PATH: LazyLock<OsString> = LazyLock::new(|| "lib/lib.c".into());
 
 pub struct Emitter<'a, 'ctx, 'alloc> {
     pub context: &'ctx Context,
@@ -41,6 +51,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
 
     pub fn emit_program(
         module_name: &str,
+        output_filename: Option<&Path>,
         program: &[Defn],
         struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
     ) {
@@ -64,9 +75,44 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             emitter.emit_defn(defn);
         }
 
-        let mut out_path = PathBuf::from(module_name);
-        out_path.set_extension("ll");
-        module.print_to_file(out_path).unwrap();
+        let dir = tempdir().unwrap();
+
+        let ll_file = dir
+            .path()
+            .join(&format!("{}.ll", module_name))
+            .into_os_string();
+        module.print_to_file(&ll_file).unwrap();
+        module.print_to_file("a.ll").unwrap();
+
+        let ll_obj_file = dir
+            .path()
+            .join(&format!("{}.o", module_name))
+            .into_os_string();
+        let mut compile_ll_cmd = Command::new("llc");
+        compile_ll_cmd.args([
+            &ll_file,
+            OsStr::new("-filetype=obj"),
+            OsStr::new("-relocation-model=pic"),
+            OsStr::new("-o"),
+            &ll_obj_file,
+        ]);
+        let status = compile_ll_cmd.status().expect("llc command failed to run");
+        if !status.success() {
+            panic!("aaaa llc returned non-zero exit status");
+        }
+
+        let mut compile_cmd = Command::new("clang");
+        compile_cmd.args([
+            &*STDLIB_PATH,
+            &ll_obj_file,
+            OsStr::new("-o"),
+            OsStr::new(module_name),
+        ]);
+        compile_cmd.status().unwrap();
+        let status = compile_cmd.status().expect("clang command failed to run");
+        if !status.success() {
+            panic!("aaaa clang returned non-zero exit status");
+        }
     }
 
     fn emit_struct_decls(&self) {
@@ -88,12 +134,17 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
     fn emit_fn_decls(&mut self, defns: &[Defn]) {
         for defn in defns {
             match &defn.kind {
-                DefnKind::Fn {
+                DefnKind::ExternFn {
                     decl,
                     params,
-                    return_ty_ast,
                     return_ty,
-                    body,
+                    ..
+                }
+                | DefnKind::Fn {
+                    decl,
+                    params,
+                    return_ty,
+                    ..
                 } => {
                     let return_ty = return_ty
                         .get()
@@ -135,16 +186,13 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 self.emit_fn(decl, params, return_ty, body);
             }
             DefnKind::Static { decl, expr } => todo!(),
+            DefnKind::ExternFn { .. } => {
+                // fn already declared, no body to emit
+            }
         }
     }
 
-    fn emit_fn(
-        &mut self,
-        decl: &DeclInfo,
-        params: &[DeclInfo],
-        return_ty: tyck::Type,
-        body: &Expr,
-    ) {
+    fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], return_ty: Type, body: &Expr) {
         let function = self
             .module
             .get_function(decl.name.item())
@@ -155,8 +203,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         self.builder.position_at_end(entry);
 
         for (i, param) in function.get_param_iter().enumerate() {
-            let name = params[i].name.item();
-            let slot = self.alloc_stack_slot(name, param.get_type());
+            let slot = self.alloc_stack_slot(param.get_type());
 
             self.builder.build_store(slot, param);
 
@@ -180,8 +227,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             StmtKind::Let(decl, expr) => {
                 let value = self.emit_expr(expr);
                 let ty = self.ty_to_ll_ty(decl.ty.get().expect("ICE: decl doesn't have ty"));
-                let name = decl.name.item();
-                let slot = self.alloc_stack_slot(name, ty);
+                let slot = self.alloc_stack_slot(ty);
                 self.builder.build_store(slot, value);
                 self.variables.insert(decl.id.get().expect("id"), slot);
                 self.unit_value()
@@ -204,7 +250,15 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 .unwrap()
                 .into(),
             ExprKind::Float(f) => self.context.f32_type().const_float_from_string(f).into(),
-            ExprKind::Str(_) => todo!(),
+            ExprKind::Str(s) => {
+                let global = unsafe { self.builder.build_global_string(s, "") };
+                let ptr = self.builder.build_pointer_cast(
+                    global.as_pointer_value(),
+                    self.unit_ty().ptr_type(AddressSpace::Generic),
+                    "",
+                );
+                self.build_str_slice(ptr, s.as_bytes().len())
+            }
             ExprKind::Char(c) => self
                 .context
                 .i8_type()
@@ -229,7 +283,25 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 }
                 struct_value.into()
             }
-            ExprKind::Array(_, _) => todo!(),
+            ExprKind::Array(exprs, size) => {
+                let ty = exprs[0].ty.get().expect("expr doesn't have ty");
+                let ll_ty = self.ty_to_ll_ty(ty);
+                let size = size.map(|s| *s.item()).unwrap_or_else(|| exprs.len());
+                let arr_ty = ll_ty.array_type(size as u32);
+
+                let values: Vec<_> = exprs.iter().map(|expr| self.emit_expr(expr)).collect();
+
+                let mut arr = arr_ty.get_undef();
+                for (i, value) in values.iter().cycle().take(size).enumerate() {
+                    arr = self
+                        .builder
+                        .build_insert_value(arr, *value, i as u32, "")
+                        .expect("index oob")
+                        .into_array_value();
+                }
+
+                arr.as_basic_value_enum()
+            }
             ExprKind::Id(name, id, is_func) => {
                 if is_func.get() {
                     self.module
@@ -245,12 +317,63 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                     self.builder.build_load(*ptr, "")
                 }
             }
-            ExprKind::PrefixOp(_, _) => todo!(),
-            ExprKind::BinOp(Spanned(op_span, Operator::Simple(op)), lhs, rhs) => {
-                self.emit_simple_binop(*op, lhs, rhs)
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Amp | PrefixOpKind::AmpMut), expr) => {
+                self.emit_place_expr(expr).into()
             }
-            ExprKind::BinOp(..) => todo!(),
-            ExprKind::Cast(expr, _) => todo!("conversion operation"),
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
+                let ptr = self.emit_expr(expr).into_pointer_value();
+                self.builder.build_load(ptr, "")
+            }
+            ExprKind::PrefixOp(_, _) => todo!(),
+            ExprKind::BinOp(Spanned(_, Operator::Simple(op)), lhs, rhs) => {
+                self.emit_binop_expr(*op, lhs, rhs)
+            }
+            ExprKind::BinOp(Spanned(_, Operator::Assign(op)), lhs, rhs) => {
+                self.emit_assign_expr(*op, lhs, rhs)
+            }
+            ExprKind::Cast(castee, _) => {
+                let value = self.emit_expr(castee);
+                match (
+                    castee.ty.get().expect("castee ty not resolved"),
+                    expr.ty.get().expect("expr ty not resolved"),
+                ) {
+                    (Type::Pointer(_, Type::Slice(_)), Type::Pointer(_, Type::Slice(_))) => {
+                        // Slices have the same layout, can use the value itself
+                        value
+                    }
+                    (Type::Pointer(_, Type::Slice(_)), Type::Pointer(_, ptr_ty)) => {
+                        let ptr = self
+                            .builder
+                            .build_extract_value(value.into_struct_value(), 0, "")
+                            .expect("index oob")
+                            .into_pointer_value();
+                        self.builder
+                            .build_pointer_cast(
+                                ptr,
+                                self.ty_to_ll_ty(*ptr_ty).ptr_type(AddressSpace::Generic),
+                                "",
+                            )
+                            .as_basic_value_enum()
+                    }
+                    (Type::Pointer(_, _), Type::Pointer(_, ptr_ty)) => self
+                        .builder
+                        .build_pointer_cast(
+                            value.into_pointer_value(),
+                            self.ty_to_ll_ty(*ptr_ty).ptr_type(AddressSpace::Generic),
+                            "",
+                        )
+                        .as_basic_value_enum(),
+                    (Type::Int, Type::Float) => self
+                        .builder
+                        .build_signed_int_to_float(
+                            value.into_int_value(),
+                            self.context.f32_type(),
+                            "",
+                        )
+                        .as_basic_value_enum(),
+                    _ => todo!("perform conversion"),
+                }
+            }
             ExprKind::Group(inner) => self.emit_expr(inner),
             ExprKind::Field(lhs, _, field, num_derefs) => {
                 let mut value = self.emit_expr(lhs);
@@ -274,7 +397,19 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                     .try_as_basic_value()
                     .unwrap_left()
             }
-            ExprKind::Index(_, _, _) => todo!(),
+            ExprKind::Index(lhs, rhs, num_derefs, autoderef_ty) => {
+                let (arr_ptr, _) = self.emit_indexable_ty_parts(
+                    lhs,
+                    num_derefs.get(),
+                    autoderef_ty.get().unwrap(),
+                );
+                let rhs_value = self.emit_expr(rhs);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_gep(arr_ptr, &[rhs_value.into_int_value()], "")
+                };
+                self.builder.build_load(elem_ptr, "").as_basic_value_enum()
+            }
             ExprKind::Range(start, end) => match (start, end) {
                 (Some(start), Some(end)) => {
                     self.build_struct(RANGE_TY_NAME, &[("start", start), ("end", end)])
@@ -342,30 +477,399 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         }
     }
 
-    fn emit_simple_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> BasicValueEnum<'ctx> {
-        let lhs_value = self.emit_expr(lhs);
-        let rhs_value = self.emit_expr(rhs);
+    /// Emits the pointer or slice pointer to the given expr. Essentially, emits the `&(expr)`.
+    fn emit_place_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
+        match &expr.kind {
+            ExprKind::Id(_, id, _) => {
+                let id = id.get().expect("variable not given id");
+                self.variables
+                    .get(&id)
+                    .expect("variable id not registered")
+                    .as_basic_value_enum()
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => self.emit_expr(expr),
+            ExprKind::Group(expr) => self.emit_place_expr(expr),
+            ExprKind::Field(lhs, _, Spanned(_, field), num_derefs) => {
+                let num_derefs = num_derefs.get();
+                let mut lhs_ptr = self.emit_place_expr(lhs).into_pointer_value();
+                for _ in 0..num_derefs {
+                    lhs_ptr = self.builder.build_load(lhs_ptr, "").into_pointer_value();
+                }
+                self.builder
+                    .build_struct_gep(lhs_ptr, field.get_index() as u32, "")
+                    .expect("index oob")
+                    .as_basic_value_enum()
+            }
+            ExprKind::Index(lhs, rhs, num_derefs, autoderef_ty) => {
+                let (mut ptr, mut size) = self.emit_indexable_ty_parts(
+                    lhs,
+                    num_derefs.get(),
+                    autoderef_ty.get().expect("autoderef ty not resolved"),
+                );
+                let rhs_value = self.emit_expr(rhs);
 
+                match rhs.ty.get().expect("expr ty not resolved") {
+                    Type::Int => unsafe {
+                        self.builder
+                            .build_gep(ptr, &[rhs_value.into_int_value()], "")
+                            .as_basic_value_enum()
+                    },
+                    Type::Struct(struct_name) => {
+                        match struct_name {
+                            RANGE_FROM_TY_NAME => {
+                                let index = self
+                                    .builder
+                                    .build_extract_value(rhs_value.into_struct_value(), 0, "")
+                                    .expect("index oob")
+                                    .into_int_value();
+                                ptr = unsafe { self.builder.build_gep(ptr, &[index], "") };
+                                size = self.builder.build_int_sub(size, index, "");
+                            }
+                            RANGE_TO_TY_NAME => {
+                                let index = self
+                                    .builder
+                                    .build_extract_value(rhs_value.into_struct_value(), 0, "")
+                                    .expect("index oob")
+                                    .into_int_value();
+                                size = index;
+                            }
+                            RANGE_TY_NAME => {
+                                let rhs_value = rhs_value.into_struct_value();
+                                let start_index = self
+                                    .builder
+                                    .build_extract_value(rhs_value, 0, "")
+                                    .expect("index oob")
+                                    .into_int_value();
+                                let end_index = self
+                                    .builder
+                                    .build_extract_value(rhs_value, 1, "")
+                                    .expect("index oob")
+                                    .into_int_value();
+                                ptr = unsafe { self.builder.build_gep(ptr, &[start_index], "") };
+                                size = self.builder.build_int_sub(end_index, start_index, "");
+                            }
+                            RANGE_FULL_TY_NAME => {}
+                            _ => unreachable!("tyck should filter out non-range struct indices"),
+                        }
+
+                        let ptr = self.builder.build_pointer_cast(
+                            ptr,
+                            self.unit_ty().ptr_type(AddressSpace::Generic),
+                            "",
+                        );
+
+                        let mut slice = self.generic_slice_ty().get_undef();
+                        slice = self
+                            .builder
+                            .build_insert_value(slice, ptr, 0, "")
+                            .expect("index oob")
+                            .into_struct_value();
+                        slice = self
+                            .builder
+                            .build_insert_value(slice, size, 1, "")
+                            .expect("index oob")
+                            .into_struct_value();
+                        slice.as_basic_value_enum()
+                    }
+                    _ => panic!("rhs type should be index"),
+                }
+            }
+            _ => panic!("temporary promotions are not supported"),
+        }
+    }
+
+    /// Emits the ref of an expr that can occur on the lhs of an index lhs[rhs].
+    fn emit_indexable_ref_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
+        match &expr.kind {
+            ExprKind::Id(_, id, _) => {
+                let id = id.get().expect("variable not given id");
+                self.variables
+                    .get(&id)
+                    .expect("variable id not registered")
+                    .as_basic_value_enum()
+            }
+            ExprKind::Group(expr) => self.emit_indexable_ref_expr(expr),
+            ExprKind::Cast(expr, _) => self.emit_indexable_ref_expr(expr),
+            _ => self.emit_expr(expr),
+        }
+    }
+
+    /// Emits a typed pointer to array/slice data and the length of that data.
+    fn emit_indexable_ty_parts(
+        &mut self,
+        lhs: &Expr,
+        num_derefs: usize,
+        autoderef_ty: Type,
+    ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        // TODO: revise so that lhs_value can either be a simple *T or a fat pointer.
+        // Logic below will make the appropriate casts depending on the autoderef_ty
+        let lhs_ptr_value = if num_derefs > 0 {
+            let mut ptr = self.emit_expr(lhs).into_pointer_value();
+            for _ in 0..num_derefs {
+                ptr = self.builder.build_load(ptr, "").into_pointer_value();
+            }
+            ptr.as_basic_value_enum()
+        } else {
+            self.emit_place_expr(lhs)
+        };
+
+        let lhs_value = self
+            .builder
+            .build_load(lhs_ptr_value.into_pointer_value(), "");
+
+        println!("{:?}", num_derefs);
+        println!("{:?}", lhs);
+        println!("{:?}", lhs_value);
+        println!("{:?}", autoderef_ty);
+
+        match autoderef_ty {
+            Type::Array(ty, size) => (
+                self.builder.build_pointer_cast(
+                    lhs_ptr_value.into_pointer_value(),
+                    self.ty_to_ll_ty(*ty).ptr_type(AddressSpace::Generic),
+                    "",
+                ),
+                self.context.i32_type().const_int(size as u64, false).into(),
+            ),
+            Type::Pointer(_, &Type::Array(ty, size)) => {
+                let ptr = self
+                    .builder
+                    .build_load(lhs_value.into_pointer_value(), "")
+                    .into_pointer_value();
+                (
+                    self.builder.build_pointer_cast(
+                        ptr,
+                        self.ty_to_ll_ty(*ty).ptr_type(AddressSpace::Generic),
+                        "",
+                    ),
+                    self.context.i32_type().const_int(size as u64, false).into(),
+                )
+            }
+            Type::Pointer(_, &Type::Slice(ty)) => (
+                self.builder.build_pointer_cast(
+                    self.builder
+                        .build_extract_value(lhs_value.into_struct_value(), 0, "")
+                        .expect("index oob")
+                        .into_pointer_value(),
+                    self.ty_to_ll_ty(*ty).ptr_type(AddressSpace::Generic),
+                    "",
+                ),
+                self.builder
+                    .build_extract_value(lhs_value.into_struct_value(), 1, "")
+                    .expect("index oob")
+                    .into_int_value(),
+            ),
+            Type::Pointer(_, Type::Str) => (
+                self.builder.build_pointer_cast(
+                    self.builder
+                        .build_extract_value(lhs_value.into_struct_value(), 0, "")
+                        .expect("index oob")
+                        .into_pointer_value(),
+                    self.ty_to_ll_ty(Type::Char).ptr_type(AddressSpace::Generic),
+                    "",
+                ),
+                self.builder
+                    .build_extract_value(lhs_value.into_struct_value(), 1, "")
+                    .expect("index oob")
+                    .into_int_value(),
+            ),
+            _ => panic!("lhs type should be indexable"),
+        }
+    }
+
+    fn emit_binop_expr(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> BasicValueEnum<'ctx> {
         match op {
-            BinOpKind::Plus => self
+            BinOpKind::AmpAmp | BinOpKind::PipePipe => {
+                let lhs_block = self
+                    .builder
+                    .get_insert_block()
+                    .expect("builder was not pointing to a block");
+
+                let lhs_value = self.emit_expr(lhs);
+                let rhs_block = self.context.append_basic_block(self.curr_fn(), "rhs");
+                let end_block = self.context.append_basic_block(self.curr_fn(), "end");
+                match op {
+                    BinOpKind::AmpAmp => {
+                        self.builder.build_conditional_branch(
+                            lhs_value.into_int_value(),
+                            rhs_block,
+                            end_block,
+                        );
+                    }
+                    BinOpKind::PipePipe => {
+                        self.builder.build_conditional_branch(
+                            lhs_value.into_int_value(),
+                            end_block,
+                            rhs_block,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+
+                self.builder.position_at_end(rhs_block);
+                let rhs_value = self.emit_expr(rhs);
+                self.builder.build_unconditional_branch(end_block);
+                let final_rhs_block = self
+                    .builder
+                    .get_insert_block()
+                    .expect("builder was not pointing to a block");
+
+                self.builder.position_at_end(end_block);
+                let phi_value = self.builder.build_phi(self.ty_to_ll_ty(Type::Bool), "");
+
+                phi_value.add_incoming(&[
+                    (&lhs_value as &dyn BasicValue, lhs_block),
+                    (&rhs_value as &dyn BasicValue, final_rhs_block),
+                ]);
+
+                phi_value.as_basic_value()
+            }
+            _ => {
+                let lhs_value = self.emit_expr(lhs);
+                let rhs_value = self.emit_expr(rhs);
+                let lhs_ty = lhs.ty.get().expect("type not resolved");
+                let rhs_ty = rhs.ty.get().expect("type not resolved");
+                if lhs_ty != rhs_ty {
+                    panic!("types must be equal on both sides of a binop");
+                }
+                self.emit_binop_from_values(op, lhs_ty, lhs_value, rhs_value)
+            }
+        }
+    }
+
+    fn emit_binop_from_values(
+        &mut self,
+        op: BinOpKind,
+        ty: Type,
+        lhs_value: BasicValueEnum<'ctx>,
+        rhs_value: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match op {
+            BinOpKind::Plus => match ty {
+                Type::Int => self
+                    .builder
+                    .build_int_add(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                Type::Float => self
+                    .builder
+                    .build_float_add(
+                        lhs_value.into_float_value(),
+                        rhs_value.into_float_value(),
+                        "",
+                    )
+                    .into(),
+                _ => unreachable!("can only add int or float"),
+            },
+            BinOpKind::Minus => match ty {
+                Type::Int => self
+                    .builder
+                    .build_int_sub(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                Type::Float => self
+                    .builder
+                    .build_float_sub(
+                        lhs_value.into_float_value(),
+                        rhs_value.into_float_value(),
+                        "",
+                    )
+                    .into(),
+                _ => unreachable!("can only sub int or float"),
+            },
+            BinOpKind::Star => match ty {
+                Type::Int => self
+                    .builder
+                    .build_int_mul(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                Type::Float => self
+                    .builder
+                    .build_float_mul(
+                        lhs_value.into_float_value(),
+                        rhs_value.into_float_value(),
+                        "",
+                    )
+                    .into(),
+                _ => unreachable!("can only mul int or float"),
+            },
+            BinOpKind::Slash => match ty {
+                Type::Int => self
+                    .builder
+                    .build_int_signed_div(
+                        lhs_value.into_int_value(),
+                        rhs_value.into_int_value(),
+                        "",
+                    )
+                    .into(),
+                Type::Float => self
+                    .builder
+                    .build_float_div(
+                        lhs_value.into_float_value(),
+                        rhs_value.into_float_value(),
+                        "",
+                    )
+                    .into(),
+                _ => unreachable!("can only div int or float"),
+            },
+            BinOpKind::Percent => match ty {
+                Type::Int => self
+                    .builder
+                    .build_int_signed_rem(
+                        lhs_value.into_int_value(),
+                        rhs_value.into_int_value(),
+                        "",
+                    )
+                    .into(),
+                Type::Float => self
+                    .builder
+                    .build_float_rem(
+                        lhs_value.into_float_value(),
+                        rhs_value.into_float_value(),
+                        "",
+                    )
+                    .into(),
+                _ => unreachable!("can only rem int or float"),
+            },
+            BinOpKind::Caret => match ty {
+                Type::Int | Type::Bool => self
+                    .builder
+                    .build_xor(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                _ => unreachable!("can only xor int or bool"),
+            },
+            BinOpKind::Amp => match ty {
+                Type::Int | Type::Bool => self
+                    .builder
+                    .build_and(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                _ => unreachable!("can only and int or bool"),
+            },
+            BinOpKind::Pipe => match ty {
+                Type::Int | Type::Bool => self
+                    .builder
+                    .build_or(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                    .into(),
+                _ => unreachable!("can only or int or bool"),
+            },
+            BinOpKind::AmpAmp => unreachable!("should have been caught earlier"),
+            BinOpKind::PipePipe => unreachable!("should have been caught earlier"),
+            BinOpKind::Lt => self
                 .builder
-                .build_int_add(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                .build_int_compare(
+                    IntPredicate::SLT,
+                    lhs_value.into_int_value(),
+                    rhs_value.into_int_value(),
+                    "",
+                )
                 .into(),
-            BinOpKind::Minus => self
-                .builder
-                .build_int_sub(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
-                .into(),
-            BinOpKind::Star => todo!(),
-            BinOpKind::Slash => todo!(),
-            BinOpKind::Percent => todo!(),
-            BinOpKind::Caret => todo!(),
-            BinOpKind::Amp => todo!(),
-            BinOpKind::Pipe => todo!(),
-            BinOpKind::AmpAmp => todo!(),
-            BinOpKind::PipePipe => todo!(),
-            BinOpKind::Lt => todo!(),
             BinOpKind::LtLt => todo!(),
-            BinOpKind::Le => todo!(),
+            BinOpKind::Le => self
+                .builder
+                .build_int_compare(
+                    IntPredicate::SLE,
+                    lhs_value.into_int_value(),
+                    rhs_value.into_int_value(),
+                    "",
+                )
+                .into(),
             BinOpKind::Gt => todo!(),
             BinOpKind::GtGt => todo!(),
             BinOpKind::Ge => todo!(),
@@ -380,6 +884,32 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 .into(),
             BinOpKind::Ne => todo!(),
         }
+    }
+
+    fn emit_assign_expr(
+        &mut self,
+        op: Option<BinOpKind>,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> BasicValueEnum<'ctx> {
+        let rhs_value = self.emit_expr(rhs);
+        let lhs_ptr = self.emit_place_expr(lhs).into_pointer_value();
+
+        let lhs_ty = lhs.ty.get().expect("type not resolved");
+        let rhs_ty = rhs.ty.get().expect("type not resolved");
+        if lhs_ty != rhs_ty {
+            panic!("types must be equal on both sides of an assignment");
+        }
+
+        let value = if let Some(op) = op {
+            let lhs_value = self.builder.build_load(lhs_ptr, "");
+            self.emit_binop_from_values(op, lhs_ty, lhs_value, rhs_value)
+        } else {
+            rhs_value
+        };
+
+        self.builder.build_store(lhs_ptr, value);
+        self.unit_value()
     }
 
     fn build_struct(&mut self, name: &str, inits: &[(&str, &Expr)]) -> BasicValueEnum<'ctx> {
@@ -402,11 +932,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
     }
 
     /// Creates a new stack allocation instruction in the entry block of the function.
-    fn alloc_stack_slot(
-        &self,
-        name: &str,
-        ty: inkwell::types::BasicTypeEnum<'ctx>,
-    ) -> PointerValue<'ctx> {
+    fn alloc_stack_slot(&self, ty: inkwell::types::BasicTypeEnum<'ctx>) -> PointerValue<'ctx> {
         let builder = self.context.create_builder();
 
         let entry = self.curr_fn().get_first_basic_block().unwrap();
@@ -419,27 +945,66 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         builder.build_alloca(ty, "")
     }
 
-    fn ty_to_ll_ty(&self, ty: tyck::Type) -> inkwell::types::BasicTypeEnum<'ctx> {
+    fn unit_ty(&self) -> BasicTypeEnum<'ctx> {
+        self.context.struct_type(&[], false).into()
+    }
+
+    fn generic_slice_ty(&self) -> StructType<'ctx> {
+        self.context.struct_type(
+            &[
+                self.unit_ty().ptr_type(AddressSpace::Generic).into(),
+                self.context.i32_type().into(),
+            ],
+            false,
+        )
+    }
+
+    fn build_str_slice(&self, ptr: PointerValue<'ctx>, size: usize) -> BasicValueEnum<'ctx> {
+        let mut slice = self.generic_slice_ty().get_undef();
+        slice = self
+            .builder
+            .build_insert_value(slice, ptr, 0, "")
+            .expect("index oob")
+            .into_struct_value();
+        slice = self
+            .builder
+            .build_insert_value(
+                slice,
+                self.context.i32_type().const_int(size as u64, false),
+                1,
+                "",
+            )
+            .expect("index oob")
+            .into_struct_value();
+        slice.as_basic_value_enum()
+    }
+
+    fn ty_to_ll_ty(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         let context = self.context;
         match ty {
-            tyck::Type::Bool => context.bool_type().into(),
-            tyck::Type::Int => context.i32_type().into(),
-            tyck::Type::Float => context.f32_type().into(),
-            tyck::Type::Char => context.i8_type().into(),
-            tyck::Type::Str => todo!(),
-            tyck::Type::Struct(name) => self
+            Type::Bool => context.bool_type().into(),
+            Type::Int => context.i32_type().into(),
+            Type::Float => context.f32_type().into(),
+            Type::Char => context.i8_type().into(),
+            Type::Str => unreachable!("bare str cannot be repr'd as an llvm type"),
+            Type::Struct(name) => self
                 .module
                 .get_struct_type(name)
                 .expect("ICE: struct ll ty should be present")
                 .as_basic_type_enum(),
-            tyck::Type::Pointer(_, _) => todo!(),
-            tyck::Type::Slice(_) => todo!(),
-            tyck::Type::Array(_, _) => todo!(),
-            tyck::Type::Tuple(tys) => {
+            Type::Pointer(_, Type::Str) => self.generic_slice_ty().into(),
+            Type::Pointer(_, Type::Slice(inner)) => self.generic_slice_ty().into(),
+            Type::Pointer(_, inner) => self
+                .ty_to_ll_ty(*inner)
+                .ptr_type(AddressSpace::Generic)
+                .into(),
+            Type::Slice(_) => unreachable!("bare slice cannot be repr'd as an llvm type"),
+            Type::Array(ty, size) => self.ty_to_ll_ty(*ty).array_type(size as u32).into(),
+            Type::Tuple(tys) => {
                 let tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
                 context.struct_type(tys.as_slice(), false).into()
             }
-            tyck::Type::Fn(params, return_type) => {
+            Type::Fn(params, return_type) => {
                 let ll_return_type = self.ty_to_ll_ty(*return_type);
                 let ll_param_types: Vec<_> = params.iter().map(|p| self.ty_to_ll_ty(*p)).collect();
                 ll_return_type

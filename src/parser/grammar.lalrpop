@@ -150,12 +150,12 @@ StructExprField: (Spanned<&'b str>, Expr<'b>) = <id:Spanned<Id>> ":" <e:Expr> =>
 
 Stmts: Vec<Stmt<'b>> = {
     Stmt+,
-    <mut stmts:Stmt+> <expr:ExprWithoutBlock> => {
-        let stmt = ast::make_expr_stmt(bump, file_id, false, expr);
+    <mut stmts:Stmt+> <expr:ExprWithoutBlock> <end:@R> => {
+        let stmt = ast::make_expr_stmt(bump, file_id, false, expr, end);
         stmts.push(stmt);
         stmts
     },
-    ExprWithoutBlock => vec![ast::make_expr_stmt(bump, file_id, false, <>)],
+    ExprWithoutBlock @R => vec![ast::make_expr_stmt(bump, file_id, false, <>)],
 };
 
 Stmt = {
@@ -168,8 +168,8 @@ LetStmt: Stmt<'b> = {
 };
 
 ExprStmt: Stmt<'b> = {
-    <ExprWithoutBlock> ";" => ast::make_expr_stmt(bump, file_id, true, <>),
-    <expr:ExprWithBlock> <semi:";"?> => ast::make_expr_stmt(bump, file_id, semi.is_some(), expr),
+    <ExprWithoutBlock> ";" <@R> => ast::make_expr_stmt(bump, file_id, true, <>),
+    <expr:ExprWithBlock> <semi:";"?> <r:@R> => ast::make_expr_stmt(bump, file_id, semi.is_some(), expr, r),
 };
 
 Type: Type<'b> = {
@@ -183,6 +183,7 @@ Type: Type<'b> = {
 };
 
 Defn: Defn<'b> = {
+    <@L> "extern" "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> ";" <@R> => ast::make_extern_fn_defn(bump, file_id, <>),
     <@L> "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> <BlockExpr> <@R> => ast::make_fn_defn(bump, file_id, <>),
     <@L> "static" <LetDeclInfo> "=" <Expr> ";" <@R> => ast::make_static_defn(bump, file_id, <>),
     StructDefn,
@@ -320,14 +321,14 @@ Delimited<T, Delim>: Vec<T> = {
     }
 };
 
-Char = {
-    r"'\\?[^']'",
+Char: &'input str = {
+    r"'\\?[^']'" => <>.trim_matches('\''),
     Spanned<"''"> =>?
         Err(ParseError::User { error: result::ParseError::EmptyChar {
             span: <>.span(),
         }}),
 };
-Str = r#""(\.|[^"])*""#;
+Str: &'input str = r#""(\.|[^"])*""# => <>.trim_matches('"');
 Id = r"[A-Za-z_$][A-Za-z0-9_]*";
 Int = {
     UInt,

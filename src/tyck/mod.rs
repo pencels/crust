@@ -1,4 +1,4 @@
-mod result;
+pub mod result;
 
 use result::{TyckError, TyckResult};
 
@@ -29,6 +29,12 @@ pub const RANGE_FULL_TY_NAME: &str = "RangeFull";
 enum Source {
     Id(Span),
     Ptr(Span),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum IndexKind {
+    Number,
+    Range,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +113,7 @@ impl<'a> Display for Type<'a> {
     }
 }
 
-fn human_type_name(ty: &Type) -> String {
+pub fn human_type_name(ty: &Type) -> String {
     match ty {
         Type::Struct(ty) => format!("struct '{}'", ty),
         _ => format!("'{}'", ty),
@@ -246,6 +252,9 @@ fn indexed_ty<'alloc>(
 ) -> TyckResult<Type<'alloc>> {
     let elem_ty = match lhs_ty {
         Type::Slice(ty) => ty,
+        Type::Pointer(_, Type::Slice(ty)) => ty,
+        Type::Pointer(_, Type::Str) => &Type::Char,
+        Type::Pointer(_, Type::Array(ty, _)) => ty,
         Type::Array(ty, _) => ty,
         _ => {
             return Err(TyckError::TypeNotIndexable {
@@ -298,7 +307,7 @@ fn tyck_is_of_type(Spanned(ty_span, ty): Spanned<&Type>, tys: &[Type]) -> TyckRe
     }
 }
 
-fn is_sized(ty: &Type) -> bool {
+pub fn is_sized(ty: &Type) -> bool {
     match ty {
         Type::Slice(_) => false,
         _ => true,
@@ -329,9 +338,16 @@ fn deref_until<'alloc, T>(
     num_derefs: &Cell<usize>,
     cond: impl FnOnce(Type<'alloc>) -> TyckResult<T>,
 ) -> TyckResult<T> {
-    while let Type::Pointer(_, inner) = ty {
-        num_derefs.set(num_derefs.get() + 1);
-        ty = *inner;
+    loop {
+        match ty {
+            Type::Array(..) => break,
+            Type::Pointer(_, Type::Array(..) | Type::Slice(_) | Type::Str) => break,
+            Type::Pointer(m, inner) => {
+                num_derefs.set(num_derefs.get() + 1);
+                ty = *inner;
+            }
+            _ => break,
+        }
     }
     cond(ty)
 }
@@ -343,10 +359,16 @@ fn deref_place_until<'alloc, T>(
     cond: impl FnOnce(bool, Type<'alloc>) -> TyckResult<T>,
 ) -> TyckResult<T> {
     let mut ptr_mut = true;
-    while let Type::Pointer(m, inner) = ty {
-        num_derefs.set(num_derefs.get() + 1);
-        ty = *inner;
-        ptr_mut &= m;
+    loop {
+        match ty {
+            Type::Pointer(_, Type::Array(..) | Type::Slice(_) | Type::Str) => break,
+            Type::Pointer(m, inner) => {
+                num_derefs.set(num_derefs.get() + 1);
+                ty = *inner;
+                ptr_mut &= m;
+            }
+            _ => break,
+        }
     }
     cond(
         if num_derefs.get() > 0 {
@@ -360,7 +382,7 @@ fn deref_place_until<'alloc, T>(
 
 pub struct TypeChecker<'alloc> {
     pub var_decl: HashMap<VarId, &'alloc DeclInfo<'alloc>>,
-    pub struct_tys: HashMap<&'alloc str, StructInfo<'alloc>>,
+    pub struct_tys: HashMap<&'alloc str, Option<StructInfo<'alloc>>>,
     pub func_decl: HashMap<&'alloc str, &'alloc DeclInfo<'alloc>>,
     pub bump: &'alloc Bump,
     pub env: Env<'alloc>,
@@ -381,47 +403,44 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         // Register all the definition declarations first before doing a full typecheck.
         for defn in program {
             match &defn.kind {
-                DefnKind::Struct { name, members } => {
-                    let mut seen_members = HashMap::new();
-                    let members: TyckResult<Vec<_>> = members
-                        .iter()
-                        .map(|mem| {
-                            if let Some(original_span) = seen_members.get(mem.name.item()) {
-                                return Err(TyckError::StructHasDuplicateMember {
-                                    duplicate_span: mem.name.span(),
-                                    original_span: *original_span,
-                                });
-                            } else {
-                                seen_members.insert(mem.name.item(), mem.name.span());
-                            }
-                            mem.ty.set(Some(Type::from(
-                                self,
-                                &mem.ty_ast.expect("struct members should have types"),
-                            )?));
-                            Ok(mem)
-                        })
-                        .collect();
-                    let members = self.bump.alloc_slice_fill_iter(members?);
+                DefnKind::Struct { name, .. } => {
                     let name = name.map(|name| &*self.bump.alloc_str(name));
-                    self.struct_tys.insert(
-                        name.item(),
-                        StructInfo {
-                            name: self.bump.alloc(name),
-                            members,
-                        },
-                    );
+                    self.struct_tys.insert(name.item(), None);
                 }
                 DefnKind::Fn { decl, .. } => {
-                    decl.ty.set(Some(Type::from(
+                    decl.set_ty(Type::from(
                         self,
                         &decl.ty_ast.expect("fn decls should have types"),
-                    )?));
+                    )?)?;
                     self.func_decl.insert(decl.name.item(), decl);
                 }
                 DefnKind::Static { decl, expr } => {
                     let expr_ty = self.tyck_expr(expr)?;
-                    decl.ty.set(Some(expr_ty));
+                    decl.set_ty(expr_ty)?;
                     self.register_decl(decl);
+                }
+                DefnKind::ExternFn {
+                    decl,
+                    params,
+                    return_ty_ast,
+                    return_ty,
+                } => {
+                    decl.set_ty(Type::from(
+                        self,
+                        &decl.ty_ast.expect("fn decls should have types"),
+                    )?)?;
+                    for param in *params {
+                        param.set_ty(Type::from(
+                            self,
+                            &param.ty_ast.expect("params should always have a type"),
+                        )?)?;
+                    }
+                    return_ty.set(Some(
+                        return_ty_ast
+                            .map(|ty| Type::from(self, &ty))
+                            .unwrap_or(Ok(Type::Tuple(&[])))?,
+                    ));
+                    self.func_decl.insert(decl.name.item(), decl);
                 }
             }
         }
@@ -436,8 +455,34 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
     fn tyck_defn(&mut self, defn: &'alloc Defn<'alloc>) -> TyckResult<()> {
         match &defn.kind {
-            DefnKind::Struct { .. } => {
-                // Structs registered in 1st pass, nothing needs to be done here.
+            DefnKind::Struct { name, members } => {
+                let mut seen_members = HashMap::new();
+                let members: TyckResult<Vec<_>> = members
+                    .iter()
+                    .map(|mem| {
+                        if let Some(original_span) = seen_members.get(mem.name.item()) {
+                            return Err(TyckError::StructHasDuplicateMember {
+                                duplicate_span: mem.name.span(),
+                                original_span: *original_span,
+                            });
+                        } else {
+                            seen_members.insert(mem.name.item(), mem.name.span());
+                        }
+                        mem.set_ty(Type::from(
+                            self,
+                            &mem.ty_ast.expect("struct members should have types"),
+                        )?)?;
+                        Ok(mem)
+                    })
+                    .collect();
+                let members = self.bump.alloc_slice_fill_iter(members?);
+                self.struct_tys.insert(
+                    name.item(),
+                    Some(StructInfo {
+                        name: self.bump.alloc(name),
+                        members,
+                    }),
+                );
                 Ok(())
             }
             DefnKind::Fn {
@@ -448,6 +493,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 body,
             } => self.tyck_fn(&decl.name, params, return_type, &return_ty, body),
             DefnKind::Static { decl, expr } => todo!(),
+            DefnKind::ExternFn { .. } => {
+                // Extern fns have no body to typecheck.
+                Ok(())
+            }
         }
     }
 
@@ -473,10 +522,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
         self.env.push();
         for param in params {
-            param.ty.set(Some(Type::from(
+            param.set_ty(Type::from(
                 self,
                 &param.ty_ast.expect("fn params always have a type"),
-            )?));
+            )?)?;
             self.register_decl(param);
         }
 
@@ -502,7 +551,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             ExprKind::Bool(_) => Ok(Type::Bool),
             ExprKind::Int(_) => Ok(Type::Int),
             ExprKind::Float(_) => Ok(Type::Float),
-            ExprKind::Str(_) => Ok(Type::Str),
+            ExprKind::Str(_) => Ok(Type::Pointer(false, self.bump.alloc(Type::Str))),
             ExprKind::Char(_) => Ok(Type::Char),
             ExprKind::Tuple(exprs) => {
                 let mut tys = Vec::new();
@@ -550,7 +599,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             ExprKind::BinOp(Spanned(s, Operator::Assign(op)), lhs, rhs) => {
                 self.tyck_assign_expr(Spanned(*s, *op), lhs, rhs)
             }
-            ExprKind::Cast(_, ty) => Type::from(self, ty),
+            ExprKind::Cast(expr, to_ty_ast) => {
+                let from_ty = self.tyck_expr(expr)?;
+                let to_ty = Type::from(self, to_ty_ast)?;
+                self.tyck_cast(Spanned(expr.span, from_ty), Spanned(to_ty_ast.span, to_ty))
+            }
             ExprKind::Call(callee, args) => {
                 let callee_ty = self.tyck_expr(callee)?;
                 match callee_ty {
@@ -607,7 +660,12 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok(else_ty)
             }
             ExprKind::Struct(Spanned(struct_name_span, struct_name), fields) => {
-                let info = match self.struct_tys.get(struct_name) {
+                let info = match self
+                    .struct_tys
+                    .get(struct_name)
+                    .map(|i| i.as_ref())
+                    .flatten()
+                {
                     Some(info) => *info,
                     None => {
                         return Err(TyckError::UndefinedType {
@@ -666,10 +724,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 })
             }
             ExprKind::Group(expr) => self.tyck_expr(expr),
-            ExprKind::Index(lhs, index, num_derefs) => {
+            ExprKind::Index(lhs, index, num_derefs, autoderef_ty) => {
                 let lhs_ty = self.tyck_expr(lhs)?;
                 let index_ty = self.tyck_expr(index)?;
                 deref_until(lhs_ty, num_derefs, |ty| {
+                    autoderef_ty.set(Some(ty));
                     indexed_ty(ty, lhs.span, index_ty, index.span)
                 })
             }
@@ -696,6 +755,22 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         expr.ty.set(Some(ty));
 
         Ok(ty)
+    }
+
+    fn tyck_cast(
+        &self,
+        Spanned(from_ty_span, from_ty): Spanned<Type<'alloc>>,
+        Spanned(to_ty_span, to_ty): Spanned<Type<'alloc>>,
+    ) -> TyckResult<Type<'alloc>> {
+        match (from_ty, to_ty) {
+            (Type::Pointer(..), Type::Pointer(..)) => Ok(to_ty),
+            _ => Err(TyckError::CannotCastType {
+                expr_span: from_ty_span,
+                ty_span: to_ty_span,
+                from_ty_name: human_type_name(&from_ty),
+                to_ty_name: human_type_name(&to_ty),
+            }),
+        }
     }
 
     fn tyck_var(
@@ -787,7 +862,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         Spanned(lhs_span, lhs_ty): Spanned<Type<'alloc>>,
         Spanned(rhs_span, rhs_ty): Spanned<Type<'alloc>>,
     ) -> TyckResult<Type<'alloc>> {
-        let Spanned(op_span, op) = op;
+        let Spanned(_, op) = op;
         match op {
             // Additive operations
             BinOpKind::Plus | BinOpKind::Minus => match lhs_ty {
@@ -802,25 +877,9 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     }
                     Ok(lhs_ty)
                 }
-                Type::Char => {
-                    tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int, Type::Char])?;
-                    Ok(rhs_ty)
-                }
-                Type::Pointer(_, ptr_ty) => {
-                    tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int])?;
-
-                    if !is_sized(ptr_ty) {
-                        return Err(TyckError::CannotDoArithmeticOnUnsizedPtr {
-                            ptr_span: lhs_span,
-                            ptr_ty: human_type_name(&ptr_ty),
-                        });
-                    }
-
-                    Ok(lhs_ty)
-                }
                 _ => {
                     return Err(TyckError::MismatchedTypes {
-                        expected_ty: "'int' or 'char' or 'float' or or a pointer".to_string(),
+                        expected_ty: "'int' or 'float'".to_string(),
                         got: lhs_span,
                         got_ty: human_type_name(&lhs_ty),
                     })
@@ -882,6 +941,14 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     return Err(TyckError::TypeNotComparable {
                         ty_span: rhs_span,
                         ty_name: human_type_name(&rhs_ty),
+                    });
+                }
+
+                if lhs_ty != rhs_ty {
+                    return Err(TyckError::MismatchedTypes {
+                        expected_ty: human_type_name(&lhs_ty),
+                        got: rhs_span,
+                        got_ty: human_type_name(&rhs_ty),
                     });
                 }
 
@@ -969,7 +1036,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         &mut self,
         expr: &'alloc Expr<'alloc>,
     ) -> TyckResult<(bool, Option<Source>, Type<'alloc>)> {
-        match &expr.kind {
+        let (mutable, source, ty) = match &expr.kind {
             ExprKind::Id(name, id, is_func) => {
                 let decl = self.tyck_var(name, id, is_func, expr.span)?;
                 Ok((
@@ -997,11 +1064,12 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 })
             }
             ExprKind::Group(expr) => self.tyck_place_expr(expr),
-            ExprKind::Index(lhs, index, num_derefs) => {
+            ExprKind::Index(lhs, index, num_derefs, autoderef_ty) => {
                 let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
                 deref_place_until(lhs_ty, mutable, num_derefs, move |mutable, ty| {
                     let index_ty = self.tyck_expr(index)?;
                     let place_ty = indexed_ty(ty, lhs.span, index_ty, index.span)?;
+                    autoderef_ty.set(Some(ty));
                     Ok((
                         mutable,
                         if num_derefs.get() > 0 { None } else { source },
@@ -1009,8 +1077,18 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     ))
                 })
             }
+            ExprKind::Cast(expr, to_ty_ast) => {
+                let (mutable, source, from_ty) = self.tyck_place_expr(expr)?;
+                let to_ty = Type::from(self, to_ty_ast)?;
+                self.tyck_cast(Spanned(expr.span, from_ty), Spanned(to_ty_ast.span, to_ty))?;
+                Ok((mutable, source, to_ty))
+            }
             _ => Err(TyckError::NotAPlaceExpr { span: expr.span }),
-        }
+        }?;
+
+        expr.ty.set(Some(ty));
+
+        Ok((mutable, source, ty))
     }
 
     fn field_access_ty(
@@ -1020,12 +1098,14 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     ) -> TyckResult<Type<'alloc>> {
         match expr_ty {
             Type::Struct(struct_name) => {
+                let info = self
+                    .struct_tys
+                    .get(struct_name)
+                    .expect("ICE: struct should be known")
+                    .expect("ICE: struct should be defined");
+
                 let field_name = match field {
                     Field::Name(x, i) => {
-                        let info = self
-                            .struct_tys
-                            .get(struct_name)
-                            .expect("ICE: struct should be known");
                         i.set(Some(info.member_index(x)));
                         x
                     }
@@ -1036,11 +1116,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         })
                     }
                 };
-
-                let info = self
-                    .struct_tys
-                    .get(struct_name)
-                    .expect("ICE: expr has struct ty that wasn't defined");
 
                 match info
                     .members
@@ -1120,7 +1195,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             None => ty,
         };
 
-        decl.ty.set(Some(decl_ty));
+        decl.set_ty(decl_ty)?;
         self.register_decl(decl);
 
         tyck_assign(Spanned(decl.name.span(), &decl_ty), Spanned(expr.span, &ty))?;

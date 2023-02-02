@@ -39,6 +39,11 @@ impl Span {
         }
     }
 
+    pub fn move_end(mut self, new_end: usize) -> Span {
+        self.end = new_end;
+        self
+    }
+
     pub fn dummy() -> Span {
         Span {
             file_id: 0,

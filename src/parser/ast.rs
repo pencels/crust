@@ -2,7 +2,7 @@ use bumpalo::Bump;
 use std::{cell::Cell, str::FromStr};
 
 use crate::{
-    tyck::{self, VarId},
+    tyck::{self, result::TyckError, VarId},
     util::{FileId, Span},
 };
 
@@ -58,6 +58,19 @@ pub struct DeclInfo<'a> {
     pub id: Cell<Option<VarId>>,
 }
 
+impl<'a> DeclInfo<'a> {
+    pub fn set_ty(&self, ty: tyck::Type<'a>) -> tyck::result::TyckResult<()> {
+        if !tyck::is_sized(&ty) {
+            return Err(TyckError::CannotAssignUnsized {
+                span: self.ty_ast.map(|ast| ast.span).unwrap_or(self.name.span()),
+                ty_name: tyck::human_type_name(&ty),
+            });
+        }
+        self.ty.set(Some(ty));
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum DefnKind<'a> {
     Struct {
@@ -74,6 +87,12 @@ pub enum DefnKind<'a> {
     Static {
         decl: DeclInfo<'a>,
         expr: Expr<'a>,
+    },
+    ExternFn {
+        decl: DeclInfo<'a>,
+        params: &'a [DeclInfo<'a>],
+        return_ty_ast: &'a Option<Type<'a>>,
+        return_ty: Cell<Option<tyck::Type<'a>>>,
     },
 }
 
@@ -116,7 +135,12 @@ pub enum ExprKind<'a> {
     Group(&'a Expr<'a>),
     Field(&'a Expr<'a>, Span, Spanned<Field<'a>>, Cell<usize>),
     Call(&'a Expr<'a>, &'a [Expr<'a>]),
-    Index(&'a Expr<'a>, &'a Expr<'a>, Cell<usize>),
+    Index(
+        &'a Expr<'a>,
+        &'a Expr<'a>,
+        Cell<usize>,
+        Cell<Option<tyck::Type<'a>>>,
+    ),
     Range(Option<&'a Expr<'a>>, Option<&'a Expr<'a>>),
     Block(&'a [Stmt<'a>]),
 
@@ -316,7 +340,7 @@ pub fn make_index_expr<'b>(
     let lhs = bump.alloc(lhs);
     let index = bump.alloc(index);
     Expr {
-        kind: ExprKind::Index(lhs, index, Cell::new(0)),
+        kind: ExprKind::Index(lhs, index, Cell::new(0), Cell::new(None)),
         span: Span::new(file_id, start, end),
         ty: Cell::new(None),
     }
@@ -451,8 +475,14 @@ pub fn make_field_expr<'b, 'input>(
 
 // Statement builder functions
 
-pub fn make_expr_stmt<'b>(_: &'b Bump, _: FileId, semi: bool, expr: Expr<'b>) -> Stmt<'b> {
-    let span = expr.span;
+pub fn make_expr_stmt<'b>(
+    _: &'b Bump,
+    _: FileId,
+    semi: bool,
+    expr: Expr<'b>,
+    semi_end: usize,
+) -> Stmt<'b> {
+    let span = expr.span.move_end(semi_end);
     let kind = if semi {
         StmtKind::Semi(expr)
     } else {
@@ -605,6 +635,49 @@ pub fn make_fn_defn<'b, 'input>(
             return_ty_ast: return_type,
             return_ty: Cell::new(None),
             body,
+        },
+        span,
+    }
+}
+
+pub fn make_extern_fn_defn<'b, 'input>(
+    bump: &'b Bump,
+    file_id: FileId,
+    start: usize,
+    name: Spanned<&'input str>,
+    params: Vec<DeclInfo<'b>>,
+    return_type: Option<Type<'b>>,
+    end: usize,
+) -> Defn<'b> {
+    let params = bump.alloc_slice_fill_iter(params);
+    let param_tys = bump.alloc_slice_fill_iter(
+        params
+            .iter()
+            .map(|decl| decl.ty_ast.expect("param types should be given")),
+    );
+    let return_type = bump.alloc(return_type);
+    let span = Span::new(file_id, start, end);
+
+    let name_span = name.span();
+    let name = name.map(|name| &*bump.alloc_str(name));
+    let decl = DeclInfo {
+        mutable: false,
+        name,
+        ty: Cell::new(None),
+        ty_ast: Some(Type {
+            kind: TypeKind::Fn(param_tys, return_type),
+            span,
+        }),
+        span: name_span,
+        id: Cell::new(None),
+    };
+
+    Defn {
+        kind: DefnKind::ExternFn {
+            decl,
+            params,
+            return_ty_ast: return_type,
+            return_ty: Cell::new(None),
         },
         span,
     }

@@ -12,7 +12,7 @@ mod util;
 use std::{
     fs::File,
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf, process::Command, ffi::{OsStr, OsString},
 };
 
 use bumpalo::Bump;
@@ -24,12 +24,15 @@ use codespan_reporting::{
         termcolor::{ColorChoice, StandardStream},
     },
 };
-use gen::Emitter;
+use gen::{Emitter, STDLIB_PATH};
 use lalrpop_util::{self, lexer::Token};
 use parser::result::ParseError;
 use parser::{ast::Defn, grammar::ProgramParser, result};
 use structopt::StructOpt;
+use tempfile::TempDir;
 use util::FileId;
+
+pub type Error = Box<dyn std::error::Error>;
 
 fn parse_file<'a>(
     bump: &'a Bump,
@@ -52,7 +55,7 @@ struct Opt {
     pub output: Option<PathBuf>,
 }
 
-fn main() {
+fn main() -> Result<(), Error> {
     let opt = Opt::from_args();
 
     let path = opt.input.as_path();
@@ -94,9 +97,12 @@ fn main() {
         }
     }
 
-    let filename = path.file_stem().unwrap().to_string_lossy();
-    Emitter::emit_program(
-        &filename,
+    let filename = path.file_stem().unwrap().to_str().unwrap();
+    let temp_dir = TempDir::new()?;
+
+    let ll_file_path = Emitter::emit_ir(
+        filename,
+        temp_dir.path(),
         opt.output.as_ref().map(|p| p.as_path()),
         &program,
         checker
@@ -105,4 +111,36 @@ fn main() {
             .map(|(k, v)| (k, v.expect("ICE: struct should be defined")))
             .collect(),
     );
+
+    let ll_obj_file = temp_dir
+        .path()
+        .join(&format!("{}.o", filename))
+        .into_os_string();
+    let mut compile_ll_cmd = Command::new("llc");
+    compile_ll_cmd.args([
+        &ll_file_path.as_os_str(),
+        OsStr::new("-filetype=obj"),
+        OsStr::new("-relocation-model=pic"),
+        OsStr::new("-o"),
+        &ll_obj_file,
+    ]);
+    let status = compile_ll_cmd.status().expect("llc command failed to run");
+    if !status.success() {
+        panic!("aaaa llc returned non-zero exit status");
+    }
+
+    let mut compile_cmd = Command::new("clang");
+    compile_cmd.args([
+        &*STDLIB_PATH,
+        &ll_obj_file,
+        OsStr::new("-o"),
+        OsStr::new(filename),
+    ]);
+    compile_cmd.status().unwrap();
+    let status = compile_cmd.status().expect("clang command failed to run");
+    if !status.success() {
+        panic!("aaaa clang returned non-zero exit status");
+    }
+
+    Ok(())
 }

@@ -9,9 +9,10 @@ mod parser;
 mod tyck;
 mod util;
 
-use std::{ffi::OsStr, fs::File, io::Read, path::PathBuf, process::Command};
+use std::{convert::TryFrom, ffi::OsStr, fs::File, io::Read, path::PathBuf, process::Command};
 
 use bumpalo::Bump;
+use camino::{Utf8Path, Utf8PathBuf};
 use codespan_derive::IntoDiagnostic;
 use codespan_reporting::{
     files::SimpleFiles,
@@ -30,6 +31,7 @@ use util::FileId;
 
 pub type Error = Box<dyn std::error::Error>;
 
+/// Parses a file, producing either a vec of definitions or a parse error.
 fn parse_file<'a>(
     bump: &'a Bump,
     file_id: FileId,
@@ -38,6 +40,19 @@ fn parse_file<'a>(
     ProgramParser::new()
         .parse(&bump, file_id, &source)
         .map_err(|error| result::into_crust_error(error, file_id))
+}
+
+/// Loads a file into the file registry, returning its id and contents.
+fn load_file(
+    files: &mut SimpleFiles<Utf8PathBuf, String>,
+    path: &Utf8Path,
+) -> Result<(usize, String), Error> {
+    let mut file = File::open(path).unwrap();
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).unwrap();
+
+    let file_id = files.add(Utf8PathBuf::try_from(path.to_path_buf())?, buf.clone());
+    Ok((file_id, buf))
 }
 
 #[derive(StructOpt, Debug)]
@@ -52,18 +67,17 @@ struct Opt {
 }
 
 fn main() -> Result<(), Error> {
-    let opt = Opt::from_args();
+    let opt: Opt = Opt::from_args();
 
-    let path = opt.input.as_path();
-    let mut file = File::open(path).unwrap();
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).unwrap();
-
+    // Init arena and file source map
     let bump = Bump::new();
-    let mut files: SimpleFiles<String, String> = SimpleFiles::new();
+    let mut files: SimpleFiles<Utf8PathBuf, String> = SimpleFiles::new();
 
-    let file_id = files.add(path.as_os_str().to_string_lossy().into_owned(), buf.clone());
+    // Read input file
+    let path = Utf8PathBuf::try_from(opt.input)?;
+    let (file_id, buf) = load_file(&mut files, &path)?;
 
+    // Parse and handle parser errors.
     let program = match parse_file(&bump, file_id, &buf) {
         Ok(program) => program,
         Err(lalrpop_util::ParseError::User { error }) => {
@@ -79,6 +93,7 @@ fn main() -> Result<(), Error> {
         }
     };
 
+    // Do type checking on the defns and handle the tyck errors.
     let mut checker = tyck::TypeChecker::new(&bump);
     match checker.tyck_program(&program) {
         Ok(_) => (),
@@ -93,26 +108,28 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    let filename = path.file_stem().unwrap().to_str().unwrap();
+    // Parsing and typechecking done, emit LLVM IR.
+    let filename = path.file_stem().unwrap();
     let temp_dir = TempDir::new()?;
+    let ll_file_path =
+        Utf8PathBuf::try_from(temp_dir.path().to_path_buf())?.join(format!("{}.ll", filename));
 
-    let ll_file_path = Emitter::emit_ir(
+    Emitter::emit_ir(
         filename,
-        temp_dir.path(),
-        opt.output.as_ref().map(|p| p.as_path()),
+        &ll_file_path,
         &program,
         checker
             .struct_tys
             .into_iter()
             .map(|(k, v)| (k, v.expect("ICE: struct should be defined")))
             .collect(),
-    );
+    )?;
 
     let ll_obj_file = temp_dir
         .path()
         .join(&format!("{}.o", filename))
         .into_os_string();
-    let mut compile_ll_cmd = Command::new("llc");
+    let mut compile_ll_cmd = Command::new("llc-15");
     compile_ll_cmd.args([
         &ll_file_path.as_os_str(),
         OsStr::new("-filetype=obj"),
@@ -120,12 +137,13 @@ fn main() -> Result<(), Error> {
         OsStr::new("-o"),
         &ll_obj_file,
     ]);
+    println!("command: {:?}", compile_ll_cmd);
     let status = compile_ll_cmd.status().expect("llc command failed to run");
     if !status.success() {
         panic!("aaaa llc returned non-zero exit status");
     }
 
-    let mut compile_cmd = Command::new("clang");
+    let mut compile_cmd = Command::new("clang-15");
     compile_cmd.args([
         &*STDLIB_PATH,
         &ll_obj_file,

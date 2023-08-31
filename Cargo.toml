@@ -21,3 +21,4 @@ codespan-derive = { git = "https://github.com/compiler-errors/codespan-derive", 
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm15-0"] }
 structopt = "0.1.7"
 structopt-derive = "0.1.0"
+camino = "1.1.6"

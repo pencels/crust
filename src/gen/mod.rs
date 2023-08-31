@@ -1,13 +1,13 @@
-use inkwell::types::{
-    AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum, StringRadix, StructType,
-};
+use camino::Utf8Path;
+use inkwell::support::LLVMString;
+use inkwell::types::{BasicTypeEnum, StringRadix, StructType};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 
-use inkwell::values::{BasicValue, IntValue};
+use inkwell::values::BasicValue;
+use inkwell::AddressSpace;
 use inkwell::{
     builder::Builder,
     context::Context,
@@ -15,17 +15,12 @@ use inkwell::{
     types::BasicType,
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
-use inkwell::{AddressSpace, IntPredicate};
 
-use crate::parser::ast::{BinOpKind, Operator, PrefixOpKind, Spanned};
-use crate::tyck::{
-    Type, VarId, RANGE_FROM_TY_NAME, RANGE_FULL_TY_NAME, RANGE_TO_TY_NAME, RANGE_TY_NAME,
-};
+use crate::tyck::{Type, VarId};
 use crate::{
     parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind},
     tyck::StructInfo,
 };
-use tempfile::tempdir;
 
 pub static STDLIB_PATH: LazyLock<OsString> = LazyLock::new(|| "lib/lib.c".into());
 
@@ -39,7 +34,7 @@ pub struct Emitter<'a, 'ctx, 'alloc> {
     variables: HashMap<VarId, PointerValue<'ctx>>,
 }
 
-impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
+impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     #[inline]
     pub fn curr_fn(&self) -> FunctionValue<'ctx> {
         self.opt_fn.unwrap()
@@ -53,11 +48,10 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
     /// Emits LLVM IR for the given program as a `.ll` file.
     pub fn emit_ir(
         module_name: &str,
-        dir_path: &Path,
-        output_filename: Option<&Path>,
+        output_path: &Utf8Path,
         program: &[Defn],
         struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
-    ) -> PathBuf {
+    ) -> Result<(), LLVMString> {
         let context = &Context::create();
         let builder = &context.create_builder();
         let module = &context.create_module(module_name);
@@ -79,11 +73,9 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             emitter.emit_defn(defn);
         }
 
-        let ll_file = dir_path.join(&format!("{}.ll", module_name));
-        module.print_to_file(OsStr::new(&ll_file)).unwrap();
-        module.print_to_file(OsStr::new("a.ll")).unwrap();
+        module.print_to_file(OsStr::new(&output_path))?;
 
-        ll_file
+        Ok(())
     }
 
     fn emit_struct_decls(&self) {

@@ -1,6 +1,6 @@
 use camino::Utf8Path;
 use inkwell::support::LLVMString;
-use inkwell::types::{BasicTypeEnum, StringRadix, StructType};
+use inkwell::types::{AnyTypeEnum, BasicTypeEnum, FunctionType, StringRadix, StructType};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
@@ -134,17 +134,24 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let ll_tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
                 self.context.struct_type(&ll_tys, false).into()
             }
+            Type::Fn(..) => self
+                .get_function_ty(ty)
+                .ptr_type(AddressSpace::default())
+                .into(),
+        }
+    }
+
+    fn get_function_ty(&self, ty: Type<'_>) -> FunctionType<'ctx> {
+        match ty {
             Type::Fn(param_tys, return_ty) => {
                 let ll_param_tys: Vec<_> = param_tys
                     .iter()
                     .map(|ty| self.ty_to_ll_ty(*ty).into())
                     .collect();
                 let ll_return_ty = self.ty_to_ll_ty(*return_ty);
-                ll_return_ty
-                    .fn_type(&ll_param_tys, false)
-                    .ptr_type(AddressSpace::default())
-                    .into()
+                ll_return_ty.fn_type(&ll_param_tys, false)
             }
+            _ => panic!("uh oh not a function"),
         }
     }
 
@@ -383,12 +390,24 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                         .as_basic_value_enum(),
                 }
             }
+            ExprKind::Call(callable, args) => {
+                let callee = self.emit_expr(callable);
+                let args: Vec<_> = args.iter().map(|arg| self.emit_expr(arg).into()).collect();
+                self.builder
+                    .build_indirect_call(
+                        self.get_function_ty(callable.ty.get().unwrap()),
+                        callee.into_pointer_value(),
+                        &args[..],
+                        "",
+                    )
+                    .try_as_basic_value()
+                    .left_or(self.unit_value())
+            }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
             // ExprKind::Cast(_, _) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
-            // ExprKind::Call(_, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
             // ExprKind::If(_, _) => todo!(),
         }

@@ -339,6 +339,50 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
                 agg.as_basic_value_enum()
             }
+            ExprKind::Range(start, end) => {
+                let start = start.map(|e| self.emit_expr(e));
+                let end = end.map(|e| self.emit_expr(e));
+
+                match (start, end) {
+                    (Some(start), Some(end)) => {
+                        let mut agg = self
+                            .context
+                            .get_struct_type("Range")
+                            .unwrap()
+                            .get_undef()
+                            .into();
+                        agg = self.builder.build_insert_value(agg, start, 0, "").unwrap();
+                        agg = self.builder.build_insert_value(agg, end, 1, "").unwrap();
+                        agg.as_basic_value_enum()
+                    }
+                    (None, Some(end)) => {
+                        let mut agg = self
+                            .context
+                            .get_struct_type("RangeTo")
+                            .unwrap()
+                            .get_undef()
+                            .into();
+                        agg = self.builder.build_insert_value(agg, end, 0, "").unwrap();
+                        agg.as_basic_value_enum()
+                    }
+                    (Some(start), None) => {
+                        let mut agg = self
+                            .context
+                            .get_struct_type("RangeFrom")
+                            .unwrap()
+                            .get_undef()
+                            .into();
+                        agg = self.builder.build_insert_value(agg, start, 0, "").unwrap();
+                        agg.as_basic_value_enum()
+                    }
+                    (None, None) => self
+                        .context
+                        .get_struct_type("RangeFull")
+                        .unwrap()
+                        .get_undef()
+                        .as_basic_value_enum(),
+                }
+            }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
@@ -346,7 +390,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Call(_, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
-            // ExprKind::Range(_, _) => todo!(),
             // ExprKind::If(_, _) => todo!(),
         }
     }

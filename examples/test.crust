@@ -36,8 +36,10 @@ fn start(range: Range) -> int {
 
 fn main() {
     let s = "hello world!";
+
     let r = Range {
         end: 1,
         start: 2,
     };
+    let rr = 1..;
 }

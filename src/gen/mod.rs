@@ -2,8 +2,7 @@ use camino::Utf8Path;
 use inkwell::support::LLVMString;
 use inkwell::types::{BasicTypeEnum, StringRadix, StructType};
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
 use std::sync::LazyLock;
 
 use inkwell::values::BasicValue;
@@ -40,9 +39,16 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         self.opt_fn.unwrap()
     }
 
+    /// Unit value `{}`.
     #[inline]
     fn unit_value(&self) -> BasicValueEnum<'ctx> {
         self.context.struct_type(&[], false).get_undef().into()
+    }
+
+    /// Opaque pointer type `ptr`.
+    #[inline]
+    fn opaque_ptr_type(&self) -> BasicTypeEnum<'ctx> {
+        self.unit_ty().ptr_type(AddressSpace::default()).into()
     }
 
     /// Emits LLVM IR for the given program as a `.ll` file.
@@ -66,19 +72,19 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         };
 
         // Emit declarations first so that all types are present
-        emitter.emit_struct_decls();
-        emitter.emit_fn_decls(program);
+        emitter.add_struct_decls();
+        emitter.add_fn_decls(program);
 
         for defn in program {
             emitter.emit_defn(defn);
         }
 
-        module.print_to_file(OsStr::new(&output_path))?;
+        module.print_to_file(&output_path)?;
 
         Ok(())
     }
 
-    fn emit_struct_decls(&self) {
+    fn add_struct_decls(&self) {
         // Forward declare all structs to handle self/cyclical references.
         for (name, _) in &self.struct_infos {
             self.context.opaque_struct_type(name);
@@ -97,16 +103,14 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
+    /// Unit type `()`.
     fn unit_ty(&self) -> StructType<'ctx> {
         self.context.struct_type(&[], false)
     }
 
     fn generic_slice_ty(&self) -> StructType<'ctx> {
         self.context.struct_type(
-            &[
-                self.unit_ty().ptr_type(AddressSpace::default()).into(),
-                self.context.i32_type().into(),
-            ],
+            &[self.opaque_ptr_type(), self.context.i32_type().into()],
             false,
         )
     }
@@ -144,7 +148,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
-    fn emit_fn_decls(&mut self, defns: &[Defn]) {
+    fn add_fn_decls(&mut self, defns: &[Defn]) {
         for defn in defns {
             match &defn.kind {
                 DefnKind::ExternFn {
@@ -180,19 +184,17 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     pub fn emit_defn(&mut self, defn: &Defn) {
         match &defn.kind {
-            DefnKind::Struct { .. } => {}
             DefnKind::Fn {
                 decl, params, body, ..
             } => {
                 self.emit_fn(decl, params, body);
             }
-            DefnKind::Static { decl, expr } => todo!(),
-            DefnKind::ExternFn { .. } => {
-                // fn already declared, no body to emit
-            }
+            DefnKind::Static { .. } => todo!("emit static variable definition"),
+            _ => {}
         }
     }
 
+    /// Emits a function definition.
     fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], body: &Expr) {
         let function = self
             .module
@@ -261,13 +263,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 .into(),
             ExprKind::Float(v) => self.context.f32_type().const_float_from_string(v).into(),
             ExprKind::Str(s) => {
-                let global = unsafe { self.builder.build_global_string(s, "") };
-                let ptr = self.builder.build_pointer_cast(
-                    global.as_pointer_value(),
-                    self.unit_ty().ptr_type(AddressSpace::default()),
-                    "",
-                );
-                self.build_str_slice(ptr, s.as_bytes().len())
+                let global = self.builder.build_global_string_ptr(s, "");
+                self.build_str_slice(global.as_pointer_value(), s.as_bytes().len())
             }
             ExprKind::Char(v) => self
                 .context
@@ -323,6 +320,24 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
             }
             ExprKind::Block(stmts) => self.emit_block(stmts),
+            ExprKind::Struct(name, init) => {
+                let info = *self.struct_infos.get(name.item()).unwrap();
+                let mut agg = self
+                    .context
+                    .get_struct_type(name.item())
+                    .unwrap()
+                    .get_undef()
+                    .into();
+                for (field, expr) in *init {
+                    let idx = info.member_index(field.item());
+                    let value = self.emit_expr(expr);
+                    agg = self
+                        .builder
+                        .build_insert_value(agg, value, idx as u32, "")
+                        .unwrap();
+                }
+                agg.as_basic_value_enum()
+            }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
@@ -332,7 +347,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             // ExprKind::Call(_, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
             // ExprKind::Range(_, _) => todo!(),
-            // ExprKind::Struct(_, _) => todo!(),
             // ExprKind::If(_, _) => todo!(),
         }
     }

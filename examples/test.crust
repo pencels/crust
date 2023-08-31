@@ -34,10 +34,10 @@ fn start(range: Range) -> int {
     range.start
 }
 
-fn main() -> int {
-    let nums = [1, 2, 3, 4, 5];
-    let in = &nums[1..];
-    let more = &(in)[1..];
-    print_int_slice(more);
-    more[2]
+fn main() {
+    let s = "hello world!";
+    let r = Range {
+        end: 1,
+        start: 2,
+    };
 }

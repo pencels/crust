@@ -145,7 +145,6 @@ fn main() -> Result<(), Error> {
         OsStr::new("-o"),
         &ll_obj_file,
     ]);
-    println!("command: {:?}", compile_ll_cmd);
     let status = compile_ll_cmd.status().expect("llc command failed to run");
     if !status.success() {
         panic!("aaaa llc returned non-zero exit status");

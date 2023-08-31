@@ -1,4 +1,4 @@
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 
 #[macro_use]
 extern crate structopt_derive;
@@ -9,11 +9,7 @@ mod parser;
 mod tyck;
 mod util;
 
-use std::{
-    fs::File,
-    io::Read,
-    path::PathBuf, process::Command, ffi::{OsStr, OsString},
-};
+use std::{ffi::OsStr, fs::File, io::Read, path::PathBuf, process::Command};
 
 use bumpalo::Bump;
 use codespan_derive::IntoDiagnostic;

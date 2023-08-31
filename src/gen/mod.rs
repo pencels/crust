@@ -1,16 +1,18 @@
-use inkwell::types::{BasicTypeEnum, StructType, BasicMetadataTypeEnum, AnyType, AnyTypeEnum, StringRadix};
-use std::sync::LazyLock;
+use inkwell::types::{
+    AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum, StringRadix, StructType,
+};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use inkwell::values::{BasicValue, IntValue};
 use inkwell::{
     builder::Builder,
     context::Context,
     module::Module,
-    types::{BasicType},
+    types::BasicType,
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
 use inkwell::{AddressSpace, IntPredicate};
@@ -77,8 +79,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             emitter.emit_defn(defn);
         }
 
-        let ll_file = dir_path
-            .join(&format!("{}.ll", module_name));
+        let ll_file = dir_path.join(&format!("{}.ll", module_name));
         module.print_to_file(OsStr::new(&ll_file)).unwrap();
         module.print_to_file(OsStr::new("a.ll")).unwrap();
 
@@ -114,7 +115,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 self.unit_ty().ptr_type(AddressSpace::default()).into(),
                 self.context.i32_type().into(),
             ],
-            false
+            false,
         )
     }
 
@@ -128,16 +129,25 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
             Type::Slice(_) => unreachable!("bare slice cannot be repr'd as an LLVM type"),
             Type::Struct(name) => self.context.get_struct_type(name).unwrap().into(),
             Type::Pointer(_, Type::Str | Type::Slice(_)) => self.generic_slice_ty().into(),
-            Type::Pointer(_, ty) => self.ty_to_ll_ty(*ty).ptr_type(AddressSpace::default()).into(),
+            Type::Pointer(_, ty) => self
+                .ty_to_ll_ty(*ty)
+                .ptr_type(AddressSpace::default())
+                .into(),
             Type::Array(ty, size) => self.ty_to_ll_ty(*ty).array_type(size as u32).into(),
             Type::Tuple(tys) => {
                 let ll_tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
                 self.context.struct_type(&ll_tys, false).into()
             }
             Type::Fn(param_tys, return_ty) => {
-                let ll_param_tys: Vec<_> = param_tys.iter().map(|ty| self.ty_to_ll_ty(*ty).into()).collect();
+                let ll_param_tys: Vec<_> = param_tys
+                    .iter()
+                    .map(|ty| self.ty_to_ll_ty(*ty).into())
+                    .collect();
                 let ll_return_ty = self.ty_to_ll_ty(*return_ty);
-                ll_return_ty.fn_type(&ll_param_tys, false).ptr_type(AddressSpace::default()).into()
+                ll_return_ty
+                    .fn_type(&ll_param_tys, false)
+                    .ptr_type(AddressSpace::default())
+                    .into()
             }
         }
     }
@@ -180,10 +190,7 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
         match &defn.kind {
             DefnKind::Struct { .. } => {}
             DefnKind::Fn {
-                decl,
-                params,
-                body,
-                ..
+                decl, params, body, ..
             } => {
                 self.emit_fn(decl, params, body);
             }
@@ -254,7 +261,12 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
     fn emit_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
         match &expr.kind {
             ExprKind::Bool(v) => self.context.bool_type().const_int(*v as u64, false).into(),
-            ExprKind::Int(v) => self.context.i32_type().const_int_from_string(v, StringRadix::Decimal).unwrap().into(),
+            ExprKind::Int(v) => self
+                .context
+                .i32_type()
+                .const_int_from_string(v, StringRadix::Decimal)
+                .unwrap()
+                .into(),
             ExprKind::Float(v) => self.context.f32_type().const_float_from_string(v).into(),
             ExprKind::Str(s) => {
                 let global = unsafe { self.builder.build_global_string(s, "") };
@@ -265,9 +277,14 @@ impl<'a, 'ctx, 'alloc> Emitter<'a, 'ctx, 'alloc> {
                 );
                 self.build_str_slice(ptr, s.as_bytes().len())
             }
-            ExprKind::Char(v) => self.context.i8_type().const_int(v.bytes().nth(0).unwrap() as u64, false).into(),
+            ExprKind::Char(v) => self
+                .context
+                .i8_type()
+                .const_int(v.bytes().nth(0).unwrap() as u64, false)
+                .into(),
             ExprKind::Tuple(exprs) => {
-                let mut struct_value = self.ty_to_ll_ty(expr.ty.get().unwrap())
+                let mut struct_value = self
+                    .ty_to_ll_ty(expr.ty.get().unwrap())
                     .into_struct_type()
                     .get_undef();
 

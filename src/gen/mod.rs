@@ -320,6 +320,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
             }
             ExprKind::Block(stmts) => self.emit_block(stmts),
+            ExprKind::Group(expr) => self.emit_expr(expr),
             ExprKind::Struct(name, init) => {
                 let info = *self.struct_infos.get(name.item()).unwrap();
                 let mut agg = self
@@ -342,7 +343,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
             // ExprKind::Cast(_, _) => todo!(),
-            // ExprKind::Group(_) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Call(_, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),

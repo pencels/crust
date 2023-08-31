@@ -1,14 +1,12 @@
 #![feature(lazy_cell)]
 
-#[macro_use]
-extern crate structopt_derive;
-
 mod gen;
 mod lexer;
 mod parser;
 mod tyck;
 mod util;
 
+use clap::Parser;
 use std::{convert::TryFrom, ffi::OsStr, fs::File, io::Read, path::PathBuf, process::Command};
 
 use bumpalo::Bump;
@@ -25,7 +23,6 @@ use gen::{Emitter, STDLIB_PATH};
 use lalrpop_util::{self, lexer::Token};
 use parser::result::ParseError;
 use parser::{ast::Defn, grammar::ProgramParser, result};
-use structopt::StructOpt;
 use tempfile::TempDir;
 use util::FileId;
 
@@ -55,26 +52,27 @@ fn load_file(
     Ok((file_id, buf))
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "crust", about = "A crusty compiler.")]
-struct Opt {
+/// A crusty compiler.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
     /// Input file path
-    #[structopt(parse(from_os_str))]
-    pub input: PathBuf,
+    #[arg()]
+    input: PathBuf,
     /// Output path
-    #[structopt(long = "output", short = "o", parse(from_os_str))]
-    pub output: Option<PathBuf>,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Error> {
-    let opt: Opt = Opt::from_args();
+    let args = Args::parse();
 
     // Init arena and file source map
     let bump = Bump::new();
     let mut files: SimpleFiles<Utf8PathBuf, String> = SimpleFiles::new();
 
     // Read input file
-    let path = Utf8PathBuf::try_from(opt.input)?;
+    let path = Utf8PathBuf::try_from(args.input)?;
     let (file_id, buf) = load_file(&mut files, &path)?;
 
     // Parse and handle parser errors.

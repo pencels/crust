@@ -62,6 +62,9 @@ struct Args {
     /// Output path
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Output LLVM IR rather than fully compiling
+    #[arg(short = 'L')]
+    emit_ir_only: bool,
 }
 
 fn main() -> Result<(), Error> {
@@ -109,8 +112,11 @@ fn main() -> Result<(), Error> {
     // Parsing and typechecking done, emit LLVM IR.
     let filename = path.file_stem().unwrap();
     let temp_dir = TempDir::new()?;
-    let ll_file_path =
-        Utf8PathBuf::try_from(temp_dir.path().to_path_buf())?.join(format!("{}.ll", filename));
+    let ll_file_path = if args.emit_ir_only {
+        Utf8PathBuf::from(format!("{}.ll", filename))
+    } else {
+        Utf8PathBuf::try_from(temp_dir.path().to_path_buf())?.join(format!("{}.ll", filename))
+    };
 
     Emitter::emit_ir(
         filename,
@@ -122,6 +128,10 @@ fn main() -> Result<(), Error> {
             .map(|(k, v)| (k, v.expect("ICE: struct should be defined")))
             .collect(),
     )?;
+
+    if args.emit_ir_only {
+        return Ok(());
+    }
 
     let ll_obj_file = temp_dir
         .path()

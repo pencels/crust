@@ -43,3 +43,20 @@ Coercion is allowed between the following types:
 - `*mut T` to `*T`
 
 - Functions to function pointers
+
+## Autoderef
+
+_Auto-dereferencing_, or _autoderef_, refers to coercing a pointer type to its target type to access a member of its target type. This can involve multiple layers of dereferencing if there are multiple levels of indirection, e.g. `***T`.
+
+```rust
+let foo = Point { x: 1, y: 2 };
+let ptr = &foo; // type is *Point
+let ptr_ptr = &ptr; // type is **Point
+
+// The following expressions result in the same value:
+foo.x;
+(*ptr).x;
+ptr.x;
+(**ptr_ptr).x;
+ptr_ptr.x;
+```

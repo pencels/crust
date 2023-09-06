@@ -197,4 +197,15 @@ pub enum TyckError {
         from_ty_name: String,
         to_ty_name: String,
     },
+
+    #[message = "Cannot coerce {from_ty_name} to {to_ty_name}"]
+    #[note = "consider adding an explicit cast"]
+    CannotCoerceType {
+        #[primary = "expr being coerced"]
+        expr_span: Span,
+        #[secondary = "coercion implied by type"]
+        ty_span: Span,
+        from_ty_name: String,
+        to_ty_name: String,
+    },
 }

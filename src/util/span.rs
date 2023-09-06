@@ -44,7 +44,7 @@ impl Span {
         self
     }
 
-    pub fn dummy() -> Span {
+    pub const fn dummy() -> Span {
         Span {
             file_id: 0,
             start: 0,

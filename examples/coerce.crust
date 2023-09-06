@@ -1,0 +1,14 @@
+fn foo(x: float) -> char { 0 }
+
+struct Foo {
+    f: fn(int) -> int,
+}
+
+fn main() {
+    let null: *() = 0;
+    let mut x = Foo {
+        f: null,
+    };
+
+    x.f = foo;
+}

@@ -1,6 +1,7 @@
 use camino::Utf8Path;
 use inkwell::support::LLVMString;
-use inkwell::types::{AnyTypeEnum, BasicTypeEnum, FunctionType, StringRadix, StructType};
+use inkwell::targets::{InitializationConfig, Target, TargetData};
+use inkwell::types::{BasicTypeEnum, FunctionType, StringRadix, StructType};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
@@ -15,7 +16,7 @@ use inkwell::{
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
 
-use crate::tyck::{Type, VarId};
+use crate::tyck::{Type, TypeKind, VarId};
 use crate::{
     parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind},
     tyck::StructInfo,
@@ -29,6 +30,7 @@ pub struct Emitter<'a, 'ctx, 'alloc> {
     pub module: &'a Module<'ctx>,
     pub opt_fn: Option<FunctionValue<'ctx>>,
 
+    target_data: &'a TargetData,
     struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
     variables: HashMap<VarId, PointerValue<'ctx>>,
 }
@@ -62,6 +64,13 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         let builder = &context.create_builder();
         let module = &context.create_module(module_name);
 
+        Target::initialize_native(&InitializationConfig::default())
+            .expect("failed to initialize target");
+
+        let engine = module
+            .create_execution_engine()
+            .expect("failed to create execution engine");
+
         let mut emitter = Emitter {
             context,
             builder,
@@ -69,6 +78,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             opt_fn: None,
             variables: HashMap::new(),
             struct_infos,
+            target_data: engine.get_target_data(),
         };
 
         // Emit declarations first so that all types are present
@@ -116,25 +126,42 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     fn ty_to_ll_ty(&self, ty: Type) -> BasicTypeEnum<'ctx> {
-        match ty {
-            Type::Bool => self.context.bool_type().into(),
-            Type::Int => self.context.i32_type().into(),
-            Type::Float => self.context.f32_type().into(),
-            Type::Char => self.context.i8_type().into(),
-            Type::Str => unreachable!("bare str cannot be repr'd as an LLVM type"),
-            Type::Slice(_) => unreachable!("bare slice cannot be repr'd as an LLVM type"),
-            Type::Struct(name) => self.context.get_struct_type(name).unwrap().into(),
-            Type::Pointer(_, Type::Str | Type::Slice(_)) => self.generic_slice_ty().into(),
-            Type::Pointer(_, ty) => self
+        use TypeKind::*;
+        match ty.kind {
+            Integral(_) => {
+                unreachable!("all integral types should have been resolved to a sized integer type")
+            }
+            Bool => self.context.bool_type().into(),
+            Byte | Char => self.context.i8_type().into(),
+            Short | UShort => self.context.i16_type().into(),
+            Int | UInt => self.context.i32_type().into(),
+            Long | ULong => self.context.i64_type().into(),
+            USize | ISize => self
+                .context
+                .ptr_sized_int_type(self.target_data, None)
+                .into(),
+            Float => self.context.f32_type().into(),
+            Double => self.context.f64_type().into(),
+            Str => unreachable!("bare str cannot be repr'd as an LLVM type"),
+            Slice(_) => unreachable!("bare slice cannot be repr'd as an LLVM type"),
+            Struct(name) => self.context.get_struct_type(name).unwrap().into(),
+            Pointer(
+                _,
+                Type {
+                    kind: Str | Slice(_),
+                    ..
+                },
+            ) => self.generic_slice_ty().into(),
+            Pointer(_, ty) => self
                 .ty_to_ll_ty(*ty)
                 .ptr_type(AddressSpace::default())
                 .into(),
-            Type::Array(ty, size) => self.ty_to_ll_ty(*ty).array_type(size as u32).into(),
-            Type::Tuple(tys) => {
+            Array(ty, size) => self.ty_to_ll_ty(*ty).array_type(size as u32).into(),
+            Tuple(tys) => {
                 let ll_tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
                 self.context.struct_type(&ll_tys, false).into()
             }
-            Type::Fn(..) => self
+            Fn(..) => self
                 .get_function_ty(ty)
                 .ptr_type(AddressSpace::default())
                 .into(),
@@ -142,8 +169,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     fn get_function_ty(&self, ty: Type<'_>) -> FunctionType<'ctx> {
-        match ty {
-            Type::Fn(param_tys, return_ty) => {
+        match ty.kind {
+            TypeKind::Fn(param_tys, return_ty) => {
                 let ll_param_tys: Vec<_> = param_tys
                     .iter()
                     .map(|ty| self.ty_to_ll_ty(*ty).into())
@@ -403,10 +430,34 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     .try_as_basic_value()
                     .left_or(self.unit_value())
             }
+            // ExprKind::Cast(expr, _) => {
+            //     let value = self.emit_expr(expr);
+            //     let expr_ll_ty = self.ty_to_ll_ty(expr.ty.get().unwrap());
+
+            //     match (value.get_type(), expr.ty.get()) {
+            //         (ty, _) if ty == expr_ll_ty => value,
+            //         (
+            //             BasicTypeEnum::PointerType(_),
+            //             Some(Type {
+            //                 kind: TypeKind::Pointer(_, to_ty),
+            //                 ..
+            //             }),
+            //         ) => self
+            //             .builder
+            //             .build_pointer_cast(
+            //                 value.into_pointer_value(),
+            //                 self.ty_to_ll_ty(*to_ty)
+            //                     .ptr_type(AddressSpace::default())
+            //                     .into(),
+            //                 "",
+            //             )
+            //             .into(),
+            //         _ => unreachable!("only thin pointer casts supported"),
+            //     }
+            // }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
-            // ExprKind::Cast(_, _) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
             // ExprKind::If(_, _) => todo!(),

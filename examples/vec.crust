@@ -1,0 +1,50 @@
+extern fn malloc(size: usize) -> *();
+extern fn realloc(ptr: *(), size: usize) -> *();
+extern fn free(ptr: *());
+
+fn max_usize(x: usize, y: usize) -> usize {
+    if x > y {
+        x
+    } else {
+        y
+    }
+}
+
+struct Vec {
+    data: **(),
+    capacity: usize,
+    len: usize,
+}
+
+fn new_vec() -> Vec {
+    Vec {
+        data: malloc(16 * 8) as **(),
+        capacity: 16,
+        len: 0,
+    }
+}
+
+fn free_vec(v: *Vec) {
+    free(v.data);
+}
+
+fn len_vec(v: *Vec) -> usize {
+    v.len
+}
+
+fn ensure_capacity_vec(v: *mut Vec, num: usize) {
+    if num > v.capacity {
+        let new_capacity = max_usize(2 * v.capacity, num + v.capacity);
+        let new_data = realloc(v.data, new_capacity * 8);
+        if new_data {
+            v.data = new_data as **();
+            v.capacity = new_capacity;
+        }
+    }
+}
+
+fn push_vec(v: *mut Vec, item: *()) {
+    ensure_capacity_vec(v, v.len + 1);
+    v.data[v.len] = item;
+    v.len += 1;
+}

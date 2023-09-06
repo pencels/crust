@@ -13,19 +13,20 @@ struct RangeTo {
 
 struct RangeFull {}
 
-// extern fn print_int(i: int);
-// extern fn print_char(c: char);
-// extern fn print(s: *str);
-// extern fn print_int_slice(s: *[int]);
-// extern fn print_int_ptr(p: *int);
-// 
-// extern fn slice_from_raw_parts(
-//     ptr: *(),
-//     len: int,
-// ) -> *[()];
-// 
-// extern fn for_each(slice: *[*()], do: fn(*()));
-// 
+extern fn print_str_slice(s: *[*char]);
+extern fn print_int(i: int);
+extern fn print_char(c: char);
+extern fn print(s: *str);
+extern fn print_int_slice(s: *[int]);
+extern fn print_int_ptr(p: *int);
+
+extern fn slice_from_raw_parts(
+    ptr: *(),
+    len: int,
+) -> *[*()];
+
+extern fn for_each(slice: *[*()], do: fn(*()));
+
 // fn do_something(input: *()) {
 //     print_int_ptr(input as *int);
 // }
@@ -38,7 +39,8 @@ fn id(x: int) -> int {
     x
 }
 
-fn main() -> int {
-    let f = id;
-    f(42)
+fn main(argc: int, argv: **char) -> int {
+    let x;
+    x = 6;
+    x
 }

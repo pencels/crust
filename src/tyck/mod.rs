@@ -17,7 +17,7 @@ use crate::{
 use maplit::hashmap;
 
 use crate::{
-    parser::ast::{self, Defn, DefnKind, Expr, TypeKind},
+    parser::ast::{self, Defn, DefnKind, Expr},
     util::fresh_id,
 };
 
@@ -59,11 +59,34 @@ impl<'a> StructInfo<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Type<'a> {
+#[derive(Debug, Clone, Copy)]
+pub struct Type<'a, T = Span> {
+    pub kind: TypeKind<'a>,
+    pub data: T,
+}
+
+impl Eq for Type<'_, Span> {}
+impl PartialEq for Type<'_, Span> {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+#[derive(Debug, Eq, Clone, Copy)]
+pub enum TypeKind<'a> {
     Bool,
+    Integral(Option<&'a str>),
+    Short,
+    UShort,
     Int,
+    UInt,
+    Long,
+    ULong,
+    USize,
+    ISize,
     Float,
+    Double,
+    Byte,
     Char,
     Str,
     Struct(&'a str),
@@ -74,35 +97,59 @@ pub enum Type<'a> {
     Fn(&'a [Type<'a>], &'a Type<'a>),
 }
 
+impl PartialEq for TypeKind<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Struct(l0), Self::Struct(r0)) => l0 == r0,
+            (Self::Pointer(l0, l1), Self::Pointer(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Slice(l0), Self::Slice(r0)) => l0 == r0,
+            (Self::Array(l0, l1), Self::Array(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Tuple(l0), Self::Tuple(r0)) => l0 == r0,
+            (Self::Fn(l0, l1), Self::Fn(r0, r1)) => l0 == r0 && l1 == r1,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
 impl<'a> Display for Type<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::Bool => write!(f, "bool"),
-            Type::Int => write!(f, "int"),
-            Type::Float => write!(f, "float"),
-            Type::Char => write!(f, "char"),
-            Type::Str => write!(f, "str"),
-            Type::Struct(s) => write!(f, "{}", s),
-            Type::Pointer(m, ty) => {
+        match self.kind {
+            TypeKind::Bool => write!(f, "bool"),
+            TypeKind::Short => write!(f, "short"),
+            TypeKind::UShort => write!(f, "ushort"),
+            TypeKind::Integral(..) => write!(f, "{{integer}}"),
+            TypeKind::Int => write!(f, "int"),
+            TypeKind::UInt => write!(f, "uint"),
+            TypeKind::Long => write!(f, "long"),
+            TypeKind::ULong => write!(f, "ulong"),
+            TypeKind::USize => write!(f, "usize"),
+            TypeKind::ISize => write!(f, "isize"),
+            TypeKind::Float => write!(f, "float"),
+            TypeKind::Double => write!(f, "double"),
+            TypeKind::Byte => write!(f, "byte"),
+            TypeKind::Char => write!(f, "char"),
+            TypeKind::Str => write!(f, "str"),
+            TypeKind::Struct(s) => write!(f, "{}", s),
+            TypeKind::Pointer(m, ty) => {
                 write!(f, "*")?;
-                if *m {
+                if m {
                     write!(f, "mut ")?;
                 }
                 write!(f, "{}", ty)
             }
-            Type::Slice(ty) => write!(f, "[{}]", ty),
-            Type::Array(ty, size) => write!(f, "[{}; {}]", ty, size),
-            Type::Tuple([]) => write!(f, "()"),
-            Type::Tuple([ty]) => write!(f, "({},)", ty),
-            Type::Tuple([ty, tys @ ..]) => {
+            TypeKind::Slice(ty) => write!(f, "[{}]", ty),
+            TypeKind::Array(ty, size) => write!(f, "[{}; {}]", ty, size),
+            TypeKind::Tuple([]) => write!(f, "()"),
+            TypeKind::Tuple([ty]) => write!(f, "({},)", ty),
+            TypeKind::Tuple([ty, tys @ ..]) => {
                 write!(f, "({}", ty)?;
                 for ty in tys {
                     write!(f, ", {}", ty)?;
                 }
                 write!(f, ")")
             }
-            Type::Fn([], rty) => write!(f, "fn() -> {}", rty),
-            Type::Fn([ty, tys @ ..], rty) => {
+            TypeKind::Fn([], rty) => write!(f, "fn() -> {}", rty),
+            TypeKind::Fn([ty, tys @ ..], rty) => {
                 write!(f, "fn({}", ty)?;
                 for ty in tys {
                     write!(f, ", {}", ty)?;
@@ -114,27 +161,89 @@ impl<'a> Display for Type<'a> {
 }
 
 pub fn human_type_name(ty: &Type) -> String {
-    match ty {
-        Type::Struct(ty) => format!("struct '{}'", ty),
+    match ty.kind {
+        TypeKind::Struct(ty) => format!("struct '{}'", ty),
         _ => format!("'{}'", ty),
     }
 }
 
 impl<'a> Type<'a> {
-    pub fn unit() -> Type<'a> {
-        Type::Tuple(&[])
+    pub const UNIT: Type<'static> = Type {
+        kind: TypeKind::Tuple(&[]),
+        data: Span::dummy(),
+    };
+
+    pub const CHAR: Type<'static> = Type {
+        kind: TypeKind::Char,
+        data: Span::dummy(),
+    };
+
+    pub fn is_unit(&self) -> bool {
+        match self.kind {
+            TypeKind::Tuple([]) => true,
+            _ => false,
+        }
+    }
+
+    pub fn new<'b>(kind: TypeKind<'b>, span: Span) -> Type<'b> {
+        Type { kind, data: span }
+    }
+
+    pub fn new_dummy<'b>(kind: TypeKind<'b>) -> Type<'b> {
+        Type {
+            kind,
+            data: Span::dummy(),
+        }
+    }
+
+    pub fn ptr<'b>(m: bool, ty: &'b Type<'b>, span: Span) -> Type {
+        Type {
+            kind: TypeKind::Pointer(m, ty),
+            data: span,
+        }
+    }
+
+    pub fn index<'b>() -> Vec<Type<'b>> {
+        vec![
+            Type::new_dummy(TypeKind::USize),
+            Type::new_dummy(TypeKind::Int),
+            Type::new_dummy(TypeKind::Struct("Range")),
+            Type::new_dummy(TypeKind::Struct("RangeFrom")),
+            Type::new_dummy(TypeKind::Struct("RangeTo")),
+            Type::new_dummy(TypeKind::Struct("RangeFull")),
+        ]
+    }
+
+    pub fn scalar<'b>() -> Vec<Type<'b>> {
+        vec![
+            Type::new_dummy(TypeKind::Byte),
+            Type::new_dummy(TypeKind::Short),
+            Type::new_dummy(TypeKind::Int),
+            Type::new_dummy(TypeKind::Long),
+            Type::new_dummy(TypeKind::Float),
+            Type::new_dummy(TypeKind::Double),
+        ]
     }
 
     pub fn from<'b>(checker: &TypeChecker<'b>, ty: &ast::Type) -> TyckResult<Type<'b>> {
-        Ok(match &ty.kind {
-            TypeKind::Id("bool") => Type::Bool,
-            TypeKind::Id("int") => Type::Int,
-            TypeKind::Id("float") => Type::Float,
-            TypeKind::Id("char") => Type::Char,
-            TypeKind::Id("str") => Type::Str,
-            TypeKind::Id(other) => {
+        let kind = match &ty.kind {
+            ast::TypeKind::Id("bool") => TypeKind::Bool,
+            ast::TypeKind::Id("short") => TypeKind::Short,
+            ast::TypeKind::Id("ushort") => TypeKind::UShort,
+            ast::TypeKind::Id("int") => TypeKind::Int,
+            ast::TypeKind::Id("uint") => TypeKind::UInt,
+            ast::TypeKind::Id("long") => TypeKind::Long,
+            ast::TypeKind::Id("ulong") => TypeKind::ULong,
+            ast::TypeKind::Id("usize") => TypeKind::USize,
+            ast::TypeKind::Id("isize") => TypeKind::ISize,
+            ast::TypeKind::Id("float") => TypeKind::Float,
+            ast::TypeKind::Id("double") => TypeKind::Double,
+            ast::TypeKind::Id("byte") => TypeKind::Byte,
+            ast::TypeKind::Id("char") => TypeKind::Char,
+            ast::TypeKind::Id("str") => TypeKind::Str,
+            ast::TypeKind::Id(other) => {
                 if checker.struct_tys.contains_key(other) {
-                    Type::Struct(checker.bump.alloc_str(other))
+                    TypeKind::Struct(checker.bump.alloc_str(other))
                 } else {
                     return Err(TyckError::UndefinedType {
                         name: other.to_string(),
@@ -142,28 +251,28 @@ impl<'a> Type<'a> {
                     });
                 }
             }
-            TypeKind::Pointer(m, inner) => {
+            ast::TypeKind::Pointer(m, inner) => {
                 let inner = checker.bump.alloc(Type::from(checker, inner)?);
-                Type::Pointer(*m, inner)
+                TypeKind::Pointer(*m, inner)
             }
-            TypeKind::Slice(inner) => {
+            ast::TypeKind::Slice(inner) => {
                 let inner = checker.bump.alloc(Type::from(checker, inner)?);
-                Type::Slice(inner)
+                TypeKind::Slice(inner)
             }
-            TypeKind::Array(inner, size) => {
+            ast::TypeKind::Array(inner, size) => {
                 let inner = checker.bump.alloc(Type::from(checker, inner)?);
-                Type::Array(inner, *size)
+                TypeKind::Array(inner, *size)
             }
-            TypeKind::Tuple([]) => Type::Tuple(&[]),
-            TypeKind::Tuple(inners) => {
+            ast::TypeKind::Tuple([]) => TypeKind::Tuple(&[]),
+            ast::TypeKind::Tuple(inners) => {
                 let inners: TyckResult<Vec<_>> = inners
                     .iter()
                     .map(|inner| Type::from(checker, inner))
                     .collect();
                 let inners = checker.bump.alloc_slice_fill_iter(inners?);
-                Type::Tuple(inners)
+                TypeKind::Tuple(inners)
             }
-            TypeKind::Fn(params, return_ty) => {
+            ast::TypeKind::Fn(params, return_ty) => {
                 let params: TyckResult<Vec<_>> = params
                     .iter()
                     .map(|param| Type::from(checker, param))
@@ -171,9 +280,14 @@ impl<'a> Type<'a> {
                 let params = checker.bump.alloc_slice_fill_iter(params?);
                 let return_ty = checker
                     .bump
-                    .alloc(return_ty.map_or(Ok(Type::Tuple(&[])), |t| Type::from(checker, &t))?);
-                Type::Fn(params, return_ty)
+                    .alloc(return_ty.map_or(Ok(Type::UNIT), |t| Type::from(checker, &t))?);
+                TypeKind::Fn(params, return_ty)
             }
+        };
+
+        Ok(Type {
+            kind,
+            data: ty.span,
         })
     }
 }
@@ -219,7 +333,7 @@ fn tyck_assign(
     Spanned(lhs_ty_span, lhs_ty): Spanned<&Type>,
     Spanned(rhs_ty_span, rhs_ty): Spanned<&Type>,
 ) -> TyckResult<()> {
-    if is_assignable(lhs_ty, rhs_ty) {
+    if can_coerce(rhs_ty, lhs_ty) {
         // Catch unsized types.
         if !is_sized(rhs_ty) {
             return Err(TyckError::CannotAssignUnsized {
@@ -244,18 +358,37 @@ fn tyck_assign(
     }
 }
 
+/// Retrieves the type that is indexed by the given index.
 fn indexed_ty<'alloc>(
     lhs_ty: Type<'alloc>,
     lhs_span: Span,
     index_ty: Type,
     index_span: Span,
 ) -> TyckResult<Type<'alloc>> {
-    let elem_ty = match lhs_ty {
-        Type::Slice(ty) => ty,
-        Type::Pointer(_, Type::Slice(ty)) => ty,
-        Type::Pointer(_, Type::Str) => &Type::Char,
-        Type::Pointer(_, Type::Array(ty, _)) => ty,
-        Type::Array(ty, _) => ty,
+    let elem_ty = match lhs_ty.kind {
+        TypeKind::Slice(ty) => ty,
+        TypeKind::Pointer(
+            _,
+            Type {
+                kind: TypeKind::Slice(ty),
+                ..
+            },
+        ) => ty,
+        TypeKind::Pointer(
+            _,
+            Type {
+                kind: TypeKind::Str,
+                ..
+            },
+        ) => &Type::CHAR,
+        TypeKind::Pointer(
+            _,
+            Type {
+                kind: TypeKind::Array(ty, _),
+                ..
+            },
+        ) => ty,
+        TypeKind::Array(ty, _) => ty,
         _ => {
             return Err(TyckError::TypeNotIndexable {
                 span: lhs_span,
@@ -263,11 +396,15 @@ fn indexed_ty<'alloc>(
             })
         }
     };
-    let place_ty = match index_ty {
-        Type::Int => *elem_ty,
-        Type::Struct(
+
+    let place_ty = match index_ty.kind {
+        TypeKind::Int | TypeKind::USize => *elem_ty,
+        TypeKind::Struct(
             RANGE_TY_NAME | RANGE_FROM_TY_NAME | RANGE_TO_TY_NAME | RANGE_FULL_TY_NAME,
-        ) => Type::Slice(elem_ty),
+        ) => Type {
+            kind: TypeKind::Slice(elem_ty),
+            data: Span::dummy(),
+        },
         _ => {
             return Err(TyckError::TypeCannotBeUsedAsAnIndex {
                 span: index_span,
@@ -279,9 +416,66 @@ fn indexed_ty<'alloc>(
 }
 
 fn is_comparable(ty: &Type) -> bool {
-    match ty {
-        Type::Int | Type::Float | Type::Char => true,
+    match ty.kind {
+        TypeKind::Int
+        | TypeKind::UInt
+        | TypeKind::Short
+        | TypeKind::UShort
+        | TypeKind::Long
+        | TypeKind::ULong
+        | TypeKind::USize
+        | TypeKind::ISize
+        | TypeKind::Float
+        | TypeKind::Double
+        | TypeKind::Byte
+        | TypeKind::Char => true,
         _ => false,
+    }
+}
+
+fn tyck_is_int_value(Spanned(ty_span, ty): Spanned<&Type>) -> TyckResult<()> {
+    match ty.kind {
+        TypeKind::Bool
+        | TypeKind::Integral(_)
+        | TypeKind::Short
+        | TypeKind::UShort
+        | TypeKind::Int
+        | TypeKind::UInt
+        | TypeKind::Long
+        | TypeKind::ULong
+        | TypeKind::USize
+        | TypeKind::ISize
+        | TypeKind::Byte
+        | TypeKind::Char => Ok(()),
+        _ => Err(TyckError::MismatchedTypes {
+            expected_ty: "an integer value type".to_string(),
+            got: ty_span,
+            got_ty: human_type_name(ty),
+        }),
+    }
+}
+
+fn tyck_is_scalar_value(Spanned(ty_span, ty): Spanned<&Type>) -> TyckResult<()> {
+    match ty.kind {
+        TypeKind::Bool
+        | TypeKind::Integral(_)
+        | TypeKind::Short
+        | TypeKind::UShort
+        | TypeKind::Int
+        | TypeKind::UInt
+        | TypeKind::Long
+        | TypeKind::ULong
+        | TypeKind::USize
+        | TypeKind::ISize
+        | TypeKind::Float
+        | TypeKind::Double
+        | TypeKind::Byte
+        | TypeKind::Char => Ok(()),
+        _ => Err(TyckError::MismatchedTypes {
+            expected_ty: "a scalar value type".to_string(),
+            got: ty_span,
+            got_ty: human_type_name(ty),
+        }),
     }
 }
 
@@ -308,28 +502,9 @@ fn tyck_is_of_type(Spanned(ty_span, ty): Spanned<&Type>, tys: &[Type]) -> TyckRe
 }
 
 pub fn is_sized(ty: &Type) -> bool {
-    match ty {
-        Type::Slice(_) => false,
+    match ty.kind {
+        TypeKind::Slice(_) | TypeKind::Str => false,
         _ => true,
-    }
-}
-
-fn is_assignable<'a>(assignee: &'a Type<'a>, ty: &'a Type<'a>) -> bool {
-    match (assignee, ty) {
-        (Type::Pointer(m1, t1), Type::Pointer(m2, t2)) => {
-            // if assignee pointer is non-mut, then any mutability pointer can be assigned,
-            // otherwise the mutability of the RHS determines assignability
-            (!m1 || *m2) && is_assignable(t1, t2)
-        }
-        (Type::Slice(t1), Type::Slice(t2)) => is_assignable(t1, t2),
-        (Type::Array(t1, n1), Type::Array(t2, n2)) => n1 == n2 && is_assignable(t1, t2),
-        (Type::Tuple(ts1), Type::Tuple(ts2)) => {
-            ts1.iter().zip(*ts2).all(|(t1, t2)| is_assignable(t1, t2))
-        }
-        (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
-            p1.iter().zip(*p2).all(|(p1, p2)| is_assignable(p2, p1)) && is_assignable(r1, r2)
-        }
-        _ => assignee == ty,
     }
 }
 
@@ -339,10 +514,16 @@ fn deref_until<'alloc, T>(
     cond: impl FnOnce(Type<'alloc>) -> TyckResult<T>,
 ) -> TyckResult<T> {
     loop {
-        match ty {
-            Type::Array(..) => break,
-            Type::Pointer(_, Type::Array(..) | Type::Slice(_) | Type::Str) => break,
-            Type::Pointer(m, inner) => {
+        match ty.kind {
+            TypeKind::Array(..) => break,
+            TypeKind::Pointer(
+                _,
+                Type {
+                    kind: TypeKind::Array(..) | TypeKind::Slice(_) | TypeKind::Str,
+                    ..
+                },
+            ) => break,
+            TypeKind::Pointer(_, inner) => {
                 num_derefs.set(num_derefs.get() + 1);
                 ty = *inner;
             }
@@ -360,9 +541,15 @@ fn deref_place_until<'alloc, T>(
 ) -> TyckResult<T> {
     let mut ptr_mut = true;
     loop {
-        match ty {
-            Type::Pointer(_, Type::Array(..) | Type::Slice(_) | Type::Str) => break,
-            Type::Pointer(m, inner) => {
+        match ty.kind {
+            TypeKind::Pointer(
+                _,
+                Type {
+                    kind: TypeKind::Array(..) | TypeKind::Slice(_) | TypeKind::Str,
+                    ..
+                },
+            ) => break,
+            TypeKind::Pointer(m, inner) => {
                 num_derefs.set(num_derefs.get() + 1);
                 ty = *inner;
                 ptr_mut &= m;
@@ -438,7 +625,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     return_ty.set(Some(
                         return_ty_ast
                             .map(|ty| Type::from(self, &ty))
-                            .unwrap_or(Ok(Type::Tuple(&[])))?,
+                            .unwrap_or(Ok(Type::UNIT))?,
                     ));
                     self.func_decl.insert(decl.name.item(), decl);
                 }
@@ -500,6 +687,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         }
     }
 
+    /// Registers a declaration in the current environment frame.
     fn register_decl(&mut self, decl: &'alloc DeclInfo<'alloc>) {
         let id = fresh_id();
         decl.id.set(Some(id));
@@ -529,13 +717,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             self.register_decl(param);
         }
 
-        let return_ty = return_ty_ast.map_or(Ok(Type::Tuple(&[])), |t| Type::from(self, &t))?;
+        let return_ty = return_ty_ast.map_or(Ok(Type::UNIT), |t| Type::from(self, &t))?;
         let body_ty = self.tyck_block(stmts)?;
         self.env.pop();
 
         return_ty_cell.set(Some(return_ty));
 
-        if is_assignable(&return_ty, &body_ty) {
+        if can_coerce(&body_ty, &return_ty) {
             Ok(())
         } else {
             Err(TyckError::MismatchedTypes {
@@ -546,20 +734,113 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         }
     }
 
+    /// Attempt to coerce an expression to a type.
+    fn coerce(
+        &mut self,
+        expr: &'alloc Expr<'alloc>,
+        to_ty: &Type<'alloc>,
+    ) -> TyckResult<Type<'alloc>> {
+        let from_ty = match expr.ty.get() {
+            Some(ty) => ty,
+            None => self.tyck_expr(expr)?,
+        };
+
+        // Do recursive coercion site analysis where applicable
+        match (&expr.kind, to_ty.kind) {
+            (ExprKind::Tuple(exprs), TypeKind::Tuple(tys)) => {
+                // Each expression in the tuple literal must be coerceable into its corresponding type in the tuple type
+                for (expr, target) in exprs.iter().zip(tys) {
+                    self.coerce(expr, target)?;
+                }
+                Ok(*to_ty)
+            }
+            (ExprKind::Array(exprs, expr_size), TypeKind::Array(ty, ty_size)) => {
+                // Each expression in the array literal must be coerceable into the array element type
+                for expr in *exprs {
+                    self.coerce(expr, ty)?;
+                }
+
+                // If the array sizes are incompatible
+                let expr_size = match expr_size {
+                    Some(Spanned(_, size)) => *size,
+                    None => exprs.len(),
+                };
+
+                if expr_size != ty_size {
+                    return Err(TyckError::InvalidArraySize {
+                        size_span: ty.data,
+                        size: ty_size,
+                        elements_span: expr.span,
+                        num_elements: expr_size,
+                    });
+                }
+
+                Ok(*to_ty)
+            }
+            (ExprKind::Group(e), _) => self.coerce(e, to_ty),
+            (ExprKind::Block(stmts), _) => match stmts.last() {
+                // Empty blocks or blocks ending with a non-expr stmt
+                Some(Stmt {
+                    kind: StmtKind::Let(..) | StmtKind::Semi(_),
+                    ..
+                })
+                | None => {
+                    if to_ty.is_unit() {
+                        Ok(*to_ty)
+                    } else {
+                        Err(TyckError::CannotCoerceType {
+                            expr_span: expr.span,
+                            ty_span: to_ty.data,
+                            from_ty_name: human_type_name(&from_ty),
+                            to_ty_name: human_type_name(&to_ty),
+                        })
+                    }
+                }
+                Some(Stmt {
+                    kind: StmtKind::Expr(e),
+                    ..
+                }) => self.coerce(e, to_ty),
+            },
+            (ExprKind::If(init, Some(last)), _) => {
+                for (_, expr) in *init {
+                    self.coerce(expr, to_ty)?;
+                }
+                self.coerce(last, to_ty)?;
+                Ok(*to_ty)
+            }
+            _ => {
+                if can_coerce(&from_ty, to_ty) {
+                    Ok(*to_ty)
+                } else {
+                    Err(TyckError::CannotCoerceType {
+                        expr_span: expr.span,
+                        ty_span: to_ty.data,
+                        from_ty_name: human_type_name(&from_ty),
+                        to_ty_name: human_type_name(&to_ty),
+                    })
+                }
+            }
+        }
+    }
+
     fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
         let ty = match &expr.kind {
-            ExprKind::Bool(_) => Ok(Type::Bool),
-            ExprKind::Int(_) => Ok(Type::Int),
-            ExprKind::Float(_) => Ok(Type::Float),
-            ExprKind::Str(_) => Ok(Type::Pointer(false, self.bump.alloc(Type::Str))),
-            ExprKind::Char(_) => Ok(Type::Char),
+            ExprKind::Bool(_) => Ok(Type::new(TypeKind::Bool, expr.span)),
+            ExprKind::Int(i) => Ok(Type::new(TypeKind::Integral(Some(i)), expr.span)),
+            ExprKind::Float(_) => Ok(Type::new(TypeKind::Float, expr.span)),
+            ExprKind::Str(_) => Ok(Type::ptr(
+                false,
+                self.bump.alloc(Type::new(TypeKind::Str, expr.span)),
+                expr.span,
+            )),
+            ExprKind::Char(_) => Ok(Type::new(TypeKind::Char, expr.span)),
             ExprKind::Tuple(exprs) => {
                 let mut tys = Vec::new();
                 for expr in *exprs {
                     tys.push(self.tyck_expr(expr)?);
                 }
                 let tys = self.bump.alloc_slice_fill_iter(tys);
-                Ok(Type::Tuple(tys))
+                Ok(Type::new(TypeKind::Tuple(tys), expr.span))
             }
             ExprKind::Array(exprs, size) => {
                 if let Some((first, rest)) = exprs.split_first() {
@@ -583,7 +864,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         exprs.len()
                     };
 
-                    Ok(Type::Array(self.bump.alloc(ty), size))
+                    Ok(Type::new(
+                        TypeKind::Array(self.bump.alloc(ty), size),
+                        expr.span,
+                    ))
                 } else {
                     todo!("ummmmm no zero length arrays pls");
                 }
@@ -606,18 +890,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
             ExprKind::Call(callee, args) => {
                 let callee_ty = self.tyck_expr(callee)?;
-                match callee_ty {
-                    Type::Fn(param_tys, rty) => {
+                match callee_ty.kind {
+                    TypeKind::Fn(param_tys, rty) => {
                         if param_tys.len() == args.len() {
                             for (param_ty, arg) in param_tys.iter().zip(*args) {
-                                let arg_ty = self.tyck_expr(arg)?;
-                                if !is_assignable(param_ty, &arg_ty) {
-                                    return Err(TyckError::MismatchedTypes {
-                                        expected_ty: human_type_name(param_ty),
-                                        got: arg.span,
-                                        got_ty: human_type_name(&arg_ty),
-                                    });
-                                }
+                                self.coerce(arg, param_ty)?;
                             }
                             Ok(*rty)
                         } else {
@@ -635,14 +912,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             ExprKind::If(thens, els) => {
                 let mut results = Vec::new();
                 for (cond, then) in *thens {
-                    let cond_ty = self.tyck_expr(cond)?;
-                    if !is_assignable(&Type::Bool, &cond_ty) {
-                        return Err(TyckError::MismatchedTypes {
-                            expected_ty: human_type_name(&Type::Bool),
-                            got: cond.span,
-                            got_ty: human_type_name(&cond_ty),
-                        });
-                    }
+                    self.coerce(cond, &Type::new(TypeKind::Bool, cond.span))?;
 
                     let then_ty = self.tyck_expr(then)?;
                     results.push(then_ty);
@@ -650,7 +920,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
                 let else_ty = match els {
                     Some(els) => self.tyck_expr(els)?,
-                    None => Type::Tuple(&[]),
+                    None => Type::UNIT,
                 };
 
                 if !results.iter().all(|&ty| ty == else_ty) {
@@ -683,10 +953,9 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 for (Spanned(field_name_span, field_name), expr) in *fields {
                     match unused.get(field_name) {
                         Some(&decl) => {
-                            let expr_ty = self.tyck_expr(expr)?;
-                            tyck_assign(
-                                Spanned(*field_name_span, &decl.ty.get().expect("type")),
-                                Spanned(expr.span, &expr_ty),
+                            self.coerce(
+                                expr,
+                                &decl.ty.get().expect("struct field type unresolved"),
                             )?;
                             unused.remove(field_name);
                         }
@@ -715,7 +984,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 }
 
                 let struct_name = self.bump.alloc_str(struct_name);
-                Ok(Type::Struct(struct_name))
+                Ok(Type::new(TypeKind::Struct(struct_name), expr.span))
             }
             ExprKind::Field(expr, op_span, field, num_derefs) => {
                 let expr_ty = self.tyck_expr(expr)?;
@@ -733,22 +1002,26 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 })
             }
             ExprKind::Range(start, end) => {
+                let index_tys = Type::index();
                 if let Some(start) = start {
                     let start_ty = self.tyck_expr(start)?;
-                    tyck_is_of_type(Spanned(start.span, &start_ty), &[Type::Int])?;
+                    tyck_is_of_type(Spanned(start.span, &start_ty), &index_tys)?;
                 }
 
                 if let Some(end) = end {
                     let end_ty = self.tyck_expr(end)?;
-                    tyck_is_of_type(Spanned(end.span, &end_ty), &[Type::Int])?;
+                    tyck_is_of_type(Spanned(end.span, &end_ty), &index_tys)?;
                 }
 
-                Ok(Type::Struct(match (start, end) {
-                    (None, None) => RANGE_FULL_TY_NAME,
-                    (Some(_), None) => RANGE_FROM_TY_NAME,
-                    (None, Some(_)) => RANGE_TO_TY_NAME,
-                    _ => RANGE_TY_NAME,
-                }))
+                Ok(Type::new(
+                    TypeKind::Struct(match (start, end) {
+                        (None, None) => RANGE_FULL_TY_NAME,
+                        (Some(_), None) => RANGE_FROM_TY_NAME,
+                        (None, Some(_)) => RANGE_TO_TY_NAME,
+                        _ => RANGE_TY_NAME,
+                    }),
+                    expr.span,
+                ))
             }
         }?;
 
@@ -762,8 +1035,26 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         Spanned(from_ty_span, from_ty): Spanned<Type<'alloc>>,
         Spanned(to_ty_span, to_ty): Spanned<Type<'alloc>>,
     ) -> TyckResult<Type<'alloc>> {
-        match (from_ty, to_ty) {
-            (Type::Pointer(..), Type::Pointer(..)) => Ok(to_ty),
+        // If the types can be coerced then it's a trivial cast
+        if can_coerce(&from_ty, &to_ty) {
+            return Ok(to_ty);
+        }
+
+        match (from_ty.kind, to_ty.kind) {
+            // Cannot cast fat pointers
+            (TypeKind::Pointer(_, from), TypeKind::Pointer(_, to)) => match (from.kind, to.kind) {
+                (x, y) if x == y => Ok(to_ty),
+                (TypeKind::Str, _)
+                | (_, TypeKind::Str)
+                | (TypeKind::Slice(..), _)
+                | (_, TypeKind::Slice(..)) => Err(TyckError::CannotCastType {
+                    expr_span: from_ty_span,
+                    ty_span: to_ty_span,
+                    from_ty_name: human_type_name(&from_ty),
+                    to_ty_name: human_type_name(&to_ty),
+                }),
+                _ => Ok(to_ty),
+            },
             _ => Err(TyckError::CannotCastType {
                 expr_span: from_ty_span,
                 ty_span: to_ty_span,
@@ -838,15 +1129,15 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         };
 
         // Catch non-assignable types
-        if let Type::Slice(_) = &lhs_ty {
+        if let TypeKind::Slice(_) = &lhs_ty.kind {
             return Err(TyckError::CannotAssignUnsized {
                 span: lhs.span,
                 ty_name: human_type_name(&lhs_ty),
             });
         }
 
-        if is_assignable(&lhs_ty, &rhs_ty) {
-            Ok(Type::unit())
+        if can_coerce(&rhs_ty, &lhs_ty) {
+            Ok(Type::UNIT)
         } else {
             Err(TyckError::MismatchedTypes {
                 expected_ty: human_type_name(&lhs_ty),
@@ -865,9 +1156,9 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let Spanned(_, op) = op;
         match op {
             // Additive operations
-            BinOpKind::Plus | BinOpKind::Minus => match lhs_ty {
-                Type::Int | Type::Float => {
-                    tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int, Type::Float])?;
+            BinOpKind::Plus | BinOpKind::Minus => match lhs_ty.kind {
+                TypeKind::Int | TypeKind::Float | TypeKind::USize => {
+                    tyck_is_scalar_value(Spanned(rhs_span, &rhs_ty))?;
                     if lhs_ty != rhs_ty {
                         return Err(TyckError::MismatchedTypes {
                             expected_ty: human_type_name(&lhs_ty),
@@ -888,22 +1179,22 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
             // Multiplicative operations
             BinOpKind::Star | BinOpKind::Slash | BinOpKind::Percent => {
-                tyck_is_of_type(Spanned(lhs_span, &lhs_ty), &[Type::Int, Type::Float])?;
-                tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int, Type::Float])?;
-                if lhs_ty != rhs_ty {
-                    return Err(TyckError::MismatchedTypes {
-                        expected_ty: human_type_name(&lhs_ty),
-                        got: rhs_span,
-                        got_ty: human_type_name(&rhs_ty),
-                    });
-                }
+                tyck_is_scalar_value(Spanned(lhs_span, &lhs_ty))?;
+                tyck_is_scalar_value(Spanned(rhs_span, &rhs_ty))?;
+                // if lhs_ty != rhs_ty {
+                //     return Err(TyckError::MismatchedTypes {
+                //         expected_ty: human_type_name(&lhs_ty),
+                //         got: rhs_span,
+                //         got_ty: human_type_name(&rhs_ty),
+                //     });
+                // }
                 Ok(lhs_ty)
             }
 
             // Bit operations
             BinOpKind::Caret | BinOpKind::Amp | BinOpKind::Pipe => {
-                tyck_is_of_type(Spanned(lhs_span, &lhs_ty), &[Type::Int, Type::Bool])?;
-                tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int, Type::Bool])?;
+                tyck_is_int_value(Spanned(lhs_span, &lhs_ty))?;
+                tyck_is_int_value(Spanned(rhs_span, &rhs_ty))?;
                 if lhs_ty != rhs_ty {
                     return Err(TyckError::MismatchedTypes {
                         expected_ty: human_type_name(&lhs_ty),
@@ -916,16 +1207,22 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
             // Shifts
             BinOpKind::LtLt | BinOpKind::GtGt => {
-                tyck_is_of_type(Spanned(lhs_span, &lhs_ty), &[Type::Int])?;
-                tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Int])?;
+                tyck_is_int_value(Spanned(lhs_span, &lhs_ty))?;
+                tyck_is_int_value(Spanned(rhs_span, &rhs_ty))?;
                 Ok(lhs_ty)
             }
 
             // Bool operations
             BinOpKind::AmpAmp | BinOpKind::PipePipe => {
-                tyck_is_of_type(Spanned(lhs_span, &lhs_ty), &[Type::Bool])?;
-                tyck_is_of_type(Spanned(rhs_span, &rhs_ty), &[Type::Bool])?;
-                Ok(Type::Bool)
+                tyck_is_of_type(
+                    Spanned(lhs_span, &lhs_ty),
+                    &[Type::new_dummy(TypeKind::Bool)],
+                )?;
+                tyck_is_of_type(
+                    Spanned(rhs_span, &rhs_ty),
+                    &[Type::new_dummy(TypeKind::Bool)],
+                )?;
+                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
             }
 
             // Comparison operations
@@ -952,7 +1249,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     });
                 }
 
-                Ok(Type::Bool)
+                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
             }
 
             // Equality operations
@@ -965,7 +1262,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     });
                 }
 
-                Ok(Type::Bool)
+                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
             }
         }
     }
@@ -989,33 +1286,39 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let ty = self.tyck_expr(expr)?;
         match op {
             PrefixOpKind::Tilde => {
-                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::Int])?;
-                Ok(Type::Int)
+                tyck_is_int_value(Spanned(expr.span, &ty))?;
+                Ok(ty)
             }
             PrefixOpKind::Bang => {
-                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::Bool])?;
-                Ok(Type::Bool)
+                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::new_dummy(TypeKind::Bool)])?;
+                Ok(Type::new(TypeKind::Bool, op_span.unite(expr.span)))
             }
             PrefixOpKind::Plus => {
-                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::Int, Type::Float])?;
+                tyck_is_scalar_value(Spanned(expr.span, &ty))?;
                 Ok(ty)
             }
             PrefixOpKind::Minus => {
-                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::Int, Type::Float])?;
+                tyck_is_scalar_value(Spanned(expr.span, &ty))?;
                 Ok(ty)
             }
-            PrefixOpKind::Star => match ty {
-                Type::Pointer(_, of) => Ok(*of),
+            PrefixOpKind::Star => match ty.kind {
+                TypeKind::Pointer(_, of) => Ok(*of),
                 _ => Err(TyckError::DereferencingNonPointer { span: expr.span }),
             },
             PrefixOpKind::Amp => {
                 let (_, _, expr_ty) = self.tyck_place_expr(expr)?;
-                Ok(Type::Pointer(false, self.bump.alloc(expr_ty)))
+                Ok(Type::new(
+                    TypeKind::Pointer(false, self.bump.alloc(expr_ty)),
+                    op_span.unite(expr.span),
+                ))
             }
             PrefixOpKind::AmpMut => {
                 let (mutable, source, expr_ty) = self.tyck_place_expr(expr)?;
                 if mutable {
-                    Ok(Type::Pointer(true, self.bump.alloc(expr_ty)))
+                    Ok(Type::new(
+                        TypeKind::Pointer(true, self.bump.alloc(expr_ty)),
+                        op_span.unite(expr.span),
+                    ))
                 } else {
                     match source.unwrap() {
                         Source::Id(s) | Source::Ptr(s) => {
@@ -1047,8 +1350,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
                 let expr_ty = self.tyck_expr(expr)?;
-                match expr_ty {
-                    Type::Pointer(m, ty) => Ok((m, Some(Source::Ptr(expr.span)), *ty)),
+                match expr_ty.kind {
+                    TypeKind::Pointer(m, ty) => Ok((m, Some(Source::Ptr(expr.span)), *ty)),
                     _ => return Err(TyckError::DereferencingNonPointer { span: expr.span }),
                 }
             }
@@ -1096,8 +1399,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         Spanned(expr_span, expr_ty): Spanned<Type<'alloc>>,
         Spanned(field_span, field): &Spanned<Field>,
     ) -> TyckResult<Type<'alloc>> {
-        match expr_ty {
-            Type::Struct(struct_name) => {
+        match expr_ty.kind {
+            TypeKind::Struct(struct_name) => {
                 let info = self
                     .struct_tys
                     .get(struct_name)
@@ -1130,7 +1433,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     }),
                 }
             }
-            Type::Tuple(elems) => match field {
+            TypeKind::Tuple(elems) => match field {
                 Field::Index(i) => {
                     let i = usize::from_str(i)
                         .expect("ICE: index field access was not an unsigned integer");
@@ -1164,7 +1467,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
             self.tyck_stmt(last)
         } else {
-            Ok(Type::Tuple(&[]))
+            Ok(Type::UNIT)
         };
         self.env.pop();
         result
@@ -1174,12 +1477,12 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         match &stmt.kind {
             StmtKind::Let(decl, expr) => {
                 self.tyck_let(decl, expr)?;
-                Ok(Type::Tuple(&[]))
+                Ok(Type::UNIT)
             }
             StmtKind::Expr(expr) => self.tyck_expr(expr),
             StmtKind::Semi(expr) => {
                 self.tyck_expr(expr)?;
-                Ok(Type::Tuple(&[]))
+                Ok(Type::UNIT)
             }
         }
     }
@@ -1191,14 +1494,122 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     ) -> TyckResult<()> {
         let ty = self.tyck_expr(expr)?;
         let decl_ty = match &decl.ty_ast {
-            Some(decl_ty_ast) => Type::from(self, decl_ty_ast)?,
+            Some(decl_ty_ast) => self.coerce(expr, &Type::from(self, decl_ty_ast)?)?,
             None => ty,
         };
 
         decl.set_ty(decl_ty)?;
         self.register_decl(decl);
 
-        tyck_assign(Spanned(decl.name.span(), &decl_ty), Spanned(expr.span, &ty))?;
         Ok(())
+    }
+}
+
+fn is_signed(ty: Type<'_>) -> Option<bool> {
+    use TypeKind::*;
+    match ty.kind {
+        Byte | Short | Int | Long | ISize => Some(true),
+        Char | UShort | UInt | ULong | USize => Some(false),
+        _ => None,
+    }
+}
+
+fn primitive_bit_width(ty: Type<'_>) -> Option<usize> {
+    use TypeKind::*;
+    Some(match ty.kind {
+        Bool => 1,
+        Byte | Char => 8,
+        Short | UShort => 16,
+        Int | UInt | Float => 32,
+        Long | ULong | Double => 64,
+        USize | ISize | Pointer(..) => 64, // HACK: hmmm
+        _ => return None,
+    })
+}
+
+fn can_coerce(from_ty: &Type<'_>, to_ty: &Type<'_>) -> bool {
+    use TypeKind::*;
+
+    macro_rules! order {
+        ($(
+            $($from:pat)|+ => $($coerced:pat)|+ $(if $e:expr)?
+        ),+ $(,)?) => {
+            match from_ty.kind {
+                $(
+                    $($from)|+ => match to_ty.kind {
+                        $(
+                            $coerced
+                        )|+ $(if $e)? => true,
+                        _ => false,
+                    }
+                )+
+                _ => false,
+            }
+        };
+    }
+
+    // Coercion is trivial if both types are the same
+    if from_ty == to_ty {
+        return true;
+    }
+
+    // Allow "truthy" values
+    if let Bool = to_ty.kind {
+        match from_ty.kind {
+            Str | Struct(_) | Slice(_) | Array(_, _) | Tuple(_) => {}
+            _ => return true,
+        }
+    }
+
+    // Allow implicit conversion from/to *()
+    if let Pointer(_, t) = to_ty.kind && t.is_unit() {
+        return true;
+    }
+    if let Pointer(_, t) = from_ty.kind && t.is_unit() {
+        return true;
+    }
+
+    // Variable size integer check
+    if let Integral(_) = from_ty.kind {
+        // FIXME: temporarily just allow coercion to any numerical types ig
+        match to_ty.kind {
+            Byte | Char | Short | UShort | Int | UInt | Long | ULong | ISize | USize | Float
+            | Double => return true,
+            _ => return false,
+        }
+    }
+
+    // Handle types that may need to be deconstructed and coerced elementwise
+    match (from_ty.kind, to_ty.kind) {
+        (TypeKind::Pointer(m1, t1), TypeKind::Pointer(m2, t2)) => {
+            // if assignee pointer is non-mut, then any mutability pointer can be assigned,
+            // otherwise the mutability of the RHS determines assignability
+            return (!m1 || m2) && can_coerce(t2, t1);
+        }
+        (TypeKind::Array(t1, n1), TypeKind::Array(t2, n2)) => {
+            return n1 == n2 && can_coerce(t2, t1)
+        }
+        (TypeKind::Tuple(ts1), TypeKind::Tuple(ts2)) => {
+            return ts1.iter().zip(ts2).all(|(t1, t2)| can_coerce(t2, t1))
+        }
+        (TypeKind::Fn(p1, r1), TypeKind::Fn(p2, r2)) => {
+            return p1.iter().zip(p2).all(|(p1, p2)| can_coerce(p2, p1)) && can_coerce(r1, r2)
+        }
+        _ => {}
+    }
+
+    order! {
+        Bool => Byte | Char | Short | UShort | Int | UInt | Long | ULong | ISize | USize | Float | Double,
+        Byte => Short | Int | Long | ISize | Float | Double,
+        Char => Short | Int | Long | ISize | UShort | UInt | ULong | USize | Float | Double,
+        Short => Int | Long | ISize | Float | Double,
+        UShort => Int | Long | ISize | UInt | ULong | USize | Float | Double,
+        Int => Long | Float | Double,
+        UInt => Long | ULong | Float | Double,
+        Long => Float | Double,
+        ULong => Float | Double,
+        Float => Double,
+        Pointer(_, x) => Pointer(false, y) if x == y,
+        Fn(..) => Pointer(false, to_ty @ Type { kind: Fn(..), .. }) if can_coerce(from_ty, to_ty),
     }
 }

@@ -38,7 +38,13 @@ If the expression in a coercion site is a _coercion-propagating expression_, the
 
 Coercion is allowed between the following types:
 
-- for [primitive types](./types.md#primitive-types): `T` to `U` if `T` is smaller than `U`
+- between integers
+    - the types must be the same signedness
+    - the source must be the same or lesser bit width than the target type
+- between floating-point values
+    - `float -> double` is allowed but not vice versa
+- integer to float
+    - allowed but may incur some loss of precision due to rounding
 
 - `*mut T` to `*T`
 

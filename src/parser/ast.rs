@@ -60,7 +60,7 @@ pub struct DeclInfo<'a> {
 
 impl<'a> DeclInfo<'a> {
     pub fn set_ty(&self, ty: tyck::Type<'a>) -> tyck::result::TyckResult<()> {
-        if !tyck::is_sized(&ty) {
+        if !&ty.is_sized() {
             return Err(TyckError::CannotAssignUnsized {
                 span: self.ty_ast.map(|ast| ast.span).unwrap_or(self.name.span()),
                 ty_name: tyck::human_type_name(&ty),

@@ -75,7 +75,7 @@ impl PartialEq for Type<'_, Span> {
 #[derive(Debug, Eq, Clone, Copy)]
 pub enum TypeKind<'a> {
     Bool,
-    Integral(Option<&'a str>),
+    Integral(&'a str),
     Short,
     UShort,
     Int,
@@ -178,6 +178,11 @@ impl<'a> Type<'a> {
         data: Span::dummy(),
     };
 
+    pub const BOOL: Type<'static> = Type {
+        kind: TypeKind::Bool,
+        data: Span::dummy(),
+    };
+
     pub fn is_unit(&self) -> bool {
         match self.kind {
             TypeKind::Tuple([]) => true,
@@ -223,6 +228,49 @@ impl<'a> Type<'a> {
             Type::new_dummy(TypeKind::Float),
             Type::new_dummy(TypeKind::Double),
         ]
+    }
+
+    pub fn is_int(&self) -> bool {
+        match self.kind {
+            TypeKind::Byte
+            | TypeKind::Char
+            | TypeKind::Integral(_)
+            | TypeKind::Short
+            | TypeKind::UShort
+            | TypeKind::Int
+            | TypeKind::UInt
+            | TypeKind::Long
+            | TypeKind::ULong
+            | TypeKind::USize
+            | TypeKind::ISize => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_int_or_float(&self) -> bool {
+        match self.kind {
+            TypeKind::Byte
+            | TypeKind::Integral(_)
+            | TypeKind::Short
+            | TypeKind::UShort
+            | TypeKind::Int
+            | TypeKind::UInt
+            | TypeKind::Long
+            | TypeKind::ULong
+            | TypeKind::USize
+            | TypeKind::ISize
+            | TypeKind::Float
+            | TypeKind::Double
+            | TypeKind::Char => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_sized(&self) -> bool {
+        match self.kind {
+            TypeKind::Slice(_) | TypeKind::Str => false,
+            _ => true,
+        }
     }
 
     pub fn from<'b>(checker: &TypeChecker<'b>, ty: &ast::Type) -> TyckResult<Type<'b>> {
@@ -335,13 +383,13 @@ fn tyck_assign(
 ) -> TyckResult<()> {
     if can_coerce(rhs_ty, lhs_ty) {
         // Catch unsized types.
-        if !is_sized(rhs_ty) {
+        if !rhs_ty.is_sized() {
             return Err(TyckError::CannotAssignUnsized {
                 span: rhs_ty_span,
                 ty_name: human_type_name(&rhs_ty),
             });
         }
-        if !is_sized(lhs_ty) {
+        if !lhs_ty.is_sized() {
             return Err(TyckError::CannotAssignUnsized {
                 span: lhs_ty_span,
                 ty_name: human_type_name(&lhs_ty),
@@ -498,13 +546,6 @@ fn tyck_is_of_type(Spanned(ty_span, ty): Spanned<&Type>, tys: &[Type]) -> TyckRe
             got: ty_span,
             got_ty: human_type_name(ty),
         })
-    }
-}
-
-pub fn is_sized(ty: &Type) -> bool {
-    match ty.kind {
-        TypeKind::Slice(_) | TypeKind::Str => false,
-        _ => true,
     }
 }
 
@@ -826,7 +867,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
         let ty = match &expr.kind {
             ExprKind::Bool(_) => Ok(Type::new(TypeKind::Bool, expr.span)),
-            ExprKind::Int(i) => Ok(Type::new(TypeKind::Integral(Some(i)), expr.span)),
+            ExprKind::Int(i) => Ok(Type::new(TypeKind::Integral(i), expr.span)),
             ExprKind::Float(_) => Ok(Type::new(TypeKind::Float, expr.span)),
             ExprKind::Str(_) => Ok(Type::ptr(
                 false,
@@ -1040,21 +1081,46 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             return Ok(to_ty);
         }
 
+        // Numeric cast
+        if from_ty.is_int_or_float() && to_ty.is_int_or_float() {
+            return Ok(to_ty);
+        }
+
+        // Primitive to int cast
+        if from_ty == Type::BOOL && to_ty.is_int() {
+            return Ok(to_ty);
+        }
+
+        // Pointer to address cast
+        if let TypeKind::Pointer(..) = from_ty.kind && to_ty.is_int() {
+            return Ok(to_ty);
+        }
+
+        // Address to pointer cast
+        if let TypeKind::Pointer(..) = to_ty.kind && from_ty.is_int() {
+            return Ok(to_ty);
+        }
+
         match (from_ty.kind, to_ty.kind) {
-            // Cannot cast fat pointers
-            (TypeKind::Pointer(_, from), TypeKind::Pointer(_, to)) => match (from.kind, to.kind) {
-                (x, y) if x == y => Ok(to_ty),
-                (TypeKind::Str, _)
-                | (_, TypeKind::Str)
-                | (TypeKind::Slice(..), _)
-                | (_, TypeKind::Slice(..)) => Err(TyckError::CannotCastType {
-                    expr_span: from_ty_span,
-                    ty_span: to_ty_span,
-                    from_ty_name: human_type_name(&from_ty),
-                    to_ty_name: human_type_name(&to_ty),
-                }),
-                _ => Ok(to_ty),
-            },
+            (TypeKind::Pointer(_, from), TypeKind::Pointer(_, to)) => {
+                if from.is_sized() && to.is_sized() || from == to {
+                    return Ok(to_ty);
+                }
+
+                // Handle pointers to unsized data
+                match (from.kind, to.kind) {
+                    (TypeKind::Slice(x), y) if x.kind == y => Ok(to_ty),
+                    (TypeKind::Str, _) | (_, TypeKind::Str) | (_, TypeKind::Slice(..)) => {
+                        Err(TyckError::CannotCastType {
+                            expr_span: from_ty_span,
+                            ty_span: to_ty_span,
+                            from_ty_name: human_type_name(&from_ty),
+                            to_ty_name: human_type_name(&to_ty),
+                        })
+                    }
+                    _ => Ok(to_ty),
+                }
+            }
             _ => Err(TyckError::CannotCastType {
                 expr_span: from_ty_span,
                 ty_span: to_ty_span,
@@ -1498,10 +1564,23 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             None => ty,
         };
 
+        let decl_ty = self.resolve_integral(&decl_ty)?;
+
         decl.set_ty(decl_ty)?;
         self.register_decl(decl);
 
         Ok(())
+    }
+
+    /// Resolve the given type (if it's an indefinite integer type) to `int`
+    fn resolve_integral(&self, ty: &Type<'alloc>) -> TyckResult<Type<'alloc>> {
+        match ty.kind {
+            TypeKind::Integral(_) => Ok(Type {
+                kind: TypeKind::Int,
+                data: ty.data,
+            }),
+            _ => Ok(*ty),
+        }
     }
 }
 

@@ -1,0 +1,6 @@
+fn test(slice: *int) {}
+
+fn main() -> int {
+    test(0 as *int);
+    0
+}

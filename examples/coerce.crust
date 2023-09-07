@@ -9,5 +9,5 @@ extern fn printf(s: *char);
 fn main() {
     let p = printf as usize;
     let print = p as fn(*char);
-    print("hi\n" as *() as *char);
+    print("hi\\n\ \"\n" as *() as *char);
 }

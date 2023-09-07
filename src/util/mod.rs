@@ -1,3 +1,4 @@
+pub mod escape;
 pub mod pretty;
 mod span;
 

@@ -17,6 +17,7 @@ use inkwell::{
 };
 
 use crate::tyck::{Type, TypeKind, VarId};
+use crate::util;
 use crate::{
     parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind},
     tyck::StructInfo,
@@ -100,27 +101,14 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         Ok(())
     }
 
-    fn extract_char_int_value(&self, text: &str) -> u64 {
-        let mut chars = text.chars();
-        match chars.next() {
-            Some(c) => match c {
-                '\\' => match chars.next() {
-                    Some(c) => match c {
-                        'a' => 0x7,
-                        'b' => 0x8,
-                        'f' => 0xc,
-                        'n' => 0xa,
-                        'r' => 0xd,
-                        't' => 0x9,
-                        'v' => 0xb,
-                        '0' => 0,
-                        _ => c as u64,
-                    },
-                    _ => unreachable!(),
-                },
-                c => c as u64,
-            },
-            _ => unreachable!(),
+    fn extract_char_int_value(&self, c: &str) -> u64 {
+        let unescaped = util::escape::unescape(c).unwrap();
+        let c = unescaped.chars().nth(0).unwrap();
+
+        if unescaped.len() == 1 && c.is_ascii() {
+            c as u64
+        } else {
+            panic!("'{}' is not ascii", c);
         }
     }
 
@@ -377,7 +365,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             }
             ExprKind::Float(v) => self.context.f32_type().const_float_from_string(v).into(),
             ExprKind::Str(s) => {
-                let global = self.builder.build_global_string_ptr(s, "");
+                let s = util::escape::unescape(s).unwrap();
+                let global = self.builder.build_global_string_ptr(&s, "");
                 self.build_str_slice(global.as_pointer_value(), s.as_bytes().len())
             }
             ExprKind::Char(v) => self

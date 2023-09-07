@@ -322,13 +322,13 @@ Delimited<T, Delim>: Vec<T> = {
 };
 
 Char: &'input str = {
-    r"'\\?[^']'" => <>.trim_matches('\''),
+    <s:r"'\\?[^']'"> => &s[1..s.len()-1],
     Spanned<"''"> =>?
         Err(ParseError::User { error: result::ParseError::EmptyChar {
             span: <>.span(),
         }}),
 };
-Str: &'input str = r#""(\.|[^"])*""# => <>.trim_matches('"');
+Str: &'input str = <s:r#""(\\[abvfnrt0\\'" ]|[^"\\])*""#> => &s[1..s.len()-1];
 Id = r"[A-Za-z_$][A-Za-z0-9_]*";
 Int = {
     UInt,

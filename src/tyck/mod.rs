@@ -32,12 +32,6 @@ enum Source {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum IndexKind {
-    Number,
-    Range,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct StructInfo<'a> {
     pub name: &'a Spanned<&'a str>,
     pub members: &'a [&'a DeclInfo<'a>],
@@ -221,17 +215,6 @@ impl<'a> Type<'a> {
             Type::new_dummy(TypeKind::Struct("RangeFrom")),
             Type::new_dummy(TypeKind::Struct("RangeTo")),
             Type::new_dummy(TypeKind::Struct("RangeFull")),
-        ]
-    }
-
-    pub fn scalar<'b>() -> Vec<Type<'b>> {
-        vec![
-            Type::new_dummy(TypeKind::Byte),
-            Type::new_dummy(TypeKind::Short),
-            Type::new_dummy(TypeKind::Int),
-            Type::new_dummy(TypeKind::Long),
-            Type::new_dummy(TypeKind::Float),
-            Type::new_dummy(TypeKind::Double),
         ]
     }
 
@@ -749,13 +732,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok(())
             }
             DefnKind::Fn {
-                decl,
                 params,
                 return_ty_ast: return_type,
                 return_ty,
                 body,
-            } => self.tyck_fn(&decl.name, params, return_type, &return_ty, body),
-            DefnKind::Static { decl, expr } => todo!(),
+                ..
+            } => self.tyck_fn(params, return_type, &return_ty, body),
+            DefnKind::Static { .. } => todo!("static definitions"),
             DefnKind::ExternFn { .. } => {
                 // Extern fns have no body to typecheck.
                 Ok(())
@@ -773,7 +756,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
     fn tyck_fn(
         &mut self,
-        name: &Spanned<&'alloc str>,
         params: &'alloc [DeclInfo<'alloc>],
         return_ty_ast: &'alloc Option<ast::Type<'alloc>>,
         return_ty_cell: &Cell<Option<Type<'alloc>>>,
@@ -1051,7 +1033,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 let struct_name = self.bump.alloc_str(struct_name);
                 Ok(Type::new(TypeKind::Struct(struct_name), expr.span))
             }
-            ExprKind::Field(expr, op_span, field, num_derefs) => {
+            ExprKind::Field(expr, _op_span, field, num_derefs) => {
                 let expr_ty = self.tyck_expr(expr)?;
                 deref_until(expr_ty, num_derefs, |ty| {
                     self.field_access_ty(Spanned(expr.span, ty), field)

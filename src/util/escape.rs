@@ -1,7 +1,7 @@
 #[derive(Debug)]
 pub struct UnescapeError {
-    idx: usize,
-    reason: UnescapeErrorReason,
+    pub idx: usize,
+    pub reason: UnescapeErrorReason,
 }
 
 #[derive(Debug)]

@@ -6,10 +6,7 @@ use std::{
     fmt::Debug,
     hash::Hash,
     marker::PhantomData,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 pub use span::Span;
@@ -17,15 +14,8 @@ pub use span::Span;
 use codespan_reporting::files::{Files, SimpleFiles};
 
 pub type FileId = <SimpleFiles<String, String> as Files<'static>>::FileId;
-pub type P<T> = Arc<T>;
 
 pub struct Id<T: ?Sized>(usize, PhantomData<T>);
-
-impl<T: ?Sized> Id<T> {
-    pub fn id(&self) -> usize {
-        self.0
-    }
-}
 
 impl<T: ?Sized> Clone for Id<T> {
     fn clone(&self) -> Self {

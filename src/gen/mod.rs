@@ -37,11 +37,6 @@ pub struct Emitter<'a, 'ctx, 'alloc> {
 }
 
 impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
-    #[inline]
-    pub fn curr_fn(&self) -> FunctionValue<'ctx> {
-        self.opt_fn.unwrap()
-    }
-
     /// Unit value `{}`.
     #[inline]
     fn unit_value(&self) -> BasicValueEnum<'ctx> {

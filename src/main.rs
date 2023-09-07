@@ -1,7 +1,6 @@
 #![feature(lazy_cell, let_chains)]
 
 mod gen;
-mod lexer;
 mod parser;
 mod tyck;
 mod util;

@@ -12,20 +12,12 @@ use super::result::{ParseError, ParseResult};
 pub struct Spanned<T>(pub Span, pub T);
 
 impl<T> Spanned<T> {
-    pub fn new(span: Span, item: T) -> Spanned<T> {
-        Spanned(span, item)
-    }
-
     pub fn span(&self) -> Span {
         self.0
     }
 
     pub fn item(&self) -> &T {
         &self.1
-    }
-
-    pub fn take_item(self) -> T {
-        self.1
     }
 
     pub fn map<F, U>(self, f: F) -> Spanned<U>
@@ -356,7 +348,7 @@ pub fn make_index_expr<'b>(
 
 pub fn make_range_expr<'b, 'input>(
     bump: &'b Bump,
-    file_id: FileId,
+    _file_id: FileId,
     op: Spanned<&'input str>,
     start: Option<Expr<'b>>,
     end: Option<Expr<'b>>,

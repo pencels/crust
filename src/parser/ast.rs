@@ -674,7 +674,7 @@ pub fn make_extern_fn_defn<'b, 'input>(
         span: name_span,
         id: Cell::new(None),
         is_fn: true,
-        extern_c: Some(true),
+        extern_c: Some(c_kw.is_some()),
     };
 
     Defn {

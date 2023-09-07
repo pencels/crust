@@ -1,0 +1,5 @@
+extern "C" fn print(s: *str);
+
+fn foo() {
+    print("i'm in foo");
+}

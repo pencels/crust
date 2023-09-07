@@ -1,0 +1,8 @@
+extern "C" fn print(s: *str);
+extern fn foo();
+
+fn main() {
+    print("i'm in main");
+    foo();
+    print("back in main");
+}

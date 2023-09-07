@@ -189,10 +189,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             .add_function(&("__crust__".to_owned() + name), ty, None)
     }
 
-    fn get_crust_function(&self, name: &str) -> FunctionValue<'ctx> {
-        self.module
-            .get_function(&("__crust__".to_owned() + name))
-            .unwrap()
+    fn get_crust_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
+        self.module.get_function(&("__crust__".to_owned() + name))
     }
 
     fn get_function_type(&self, ty: Type<'_>) -> FunctionType<'ctx> {
@@ -275,7 +273,9 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     /// Emits a function definition.
     fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], ret_ty: &Type, body: &Expr) {
-        let function = self.get_crust_function(decl.name.item());
+        let function = self
+            .get_crust_function(decl.name.item())
+            .expect("ICE: crust internal function not found");
         self.opt_fn = Some(function);
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -439,11 +439,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let decl = decl.get().unwrap();
                 if decl.is_fn {
                     let func = match decl.extern_c {
-                        Some(true) => self.module.get_function(name).unwrap(),
+                        Some(true) => self.module.get_function(name),
                         Some(false) => self.get_crust_function(name),
                         None => unreachable!(),
                     };
-                    func.as_global_value().as_pointer_value().into()
+                    func.unwrap().as_global_value().as_pointer_value().into()
                 } else {
                     let expr_ty = self.ty_to_ll_type(expr.ty.get().unwrap());
                     let ptr = self.variables.get(&var_id.get().unwrap()).unwrap();

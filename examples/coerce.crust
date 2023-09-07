@@ -4,10 +4,8 @@ struct Foo {
     f: fn(int) -> int,
 }
 
-extern fn printf(s: *char);
+extern "C" fn print(s: *str);
 
 fn main() {
-    let p = printf as usize;
-    let print = p as fn(*char);
-    print("hi\\n\ \"\n" as *() as *char);
+    print("hello world!");
 }

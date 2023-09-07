@@ -173,6 +173,11 @@ impl<'a> Type<'a> {
         data: Span::dummy(),
     };
 
+    pub const INT: Type<'static> = Type {
+        kind: TypeKind::Int,
+        data: Span::dummy(),
+    };
+
     pub const CHAR: Type<'static> = Type {
         kind: TypeKind::Char,
         data: Span::dummy(),
@@ -681,6 +686,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     params,
                     return_ty_ast,
                     return_ty,
+                    ..
                 } => {
                     decl.set_ty(Type::from(
                         self,
@@ -1158,7 +1164,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         &self,
         name: &str,
         id: &Cell<Option<usize>>,
-        is_func: &Cell<bool>,
+        decl_cell: &Cell<Option<&'alloc DeclInfo<'alloc>>>,
         span: Span,
     ) -> TyckResult<&'alloc DeclInfo<'alloc>> {
         if let Some(lookup_id) = self.env.get(name) {
@@ -1168,10 +1174,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 .var_decl
                 .get(&lookup_id)
                 .expect("ICE: var id in env was not in the var_decl map");
-            is_func.set(false);
+            decl_cell.set(Some(decl));
             Ok(decl)
         } else if let Some(decl) = self.func_decl.get(name) {
-            is_func.set(true);
+            decl_cell.set(Some(decl));
             Ok(decl)
         } else {
             Err(TyckError::UndefinedVar { span })

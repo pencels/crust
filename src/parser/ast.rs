@@ -56,6 +56,12 @@ pub struct DeclInfo<'a> {
 
     /// Unique identifier for this variable, given in tyck phase.
     pub id: Cell<Option<VarId>>,
+
+    /// `true` if the declaration is a function.
+    pub is_fn: bool,
+
+    /// Marked on a function decl for whether it is an `extern "C" fn` decl. `None` for non-fn decls.
+    pub extern_c: Option<bool>,
 }
 
 impl<'a> DeclInfo<'a> {
@@ -90,6 +96,8 @@ pub enum DefnKind<'a> {
     },
     ExternFn {
         decl: DeclInfo<'a>,
+        /// The extern function is a C FFI.
+        c: bool,
         params: &'a [DeclInfo<'a>],
         return_ty_ast: &'a Option<Type<'a>>,
         return_ty: Cell<Option<tyck::Type<'a>>>,
@@ -126,7 +134,7 @@ pub enum ExprKind<'a> {
     Tuple(&'a [Expr<'a>]),
     Array(&'a [Expr<'a>], Option<Spanned<usize>>),
 
-    Id(&'a str, Cell<Option<VarId>>, Cell<bool>),
+    Id(&'a str, Cell<Option<VarId>>, Cell<Option<&'a DeclInfo<'a>>>),
 
     PrefixOp(Spanned<PrefixOpKind>, &'a Expr<'a>),
     BinOp(Spanned<Operator>, &'a Expr<'a>, &'a Expr<'a>),
@@ -626,6 +634,8 @@ pub fn make_fn_defn<'b, 'input>(
         }),
         span: name_span,
         id: Cell::new(None),
+        is_fn: true,
+        extern_c: Some(false),
     };
 
     Defn {
@@ -644,6 +654,7 @@ pub fn make_extern_fn_defn<'b, 'input>(
     bump: &'b Bump,
     file_id: FileId,
     start: usize,
+    c_kw: Option<&'input str>,
     name: Spanned<&'input str>,
     params: Vec<DeclInfo<'b>>,
     return_type: Option<Type<'b>>,
@@ -670,11 +681,14 @@ pub fn make_extern_fn_defn<'b, 'input>(
         }),
         span: name_span,
         id: Cell::new(None),
+        is_fn: true,
+        extern_c: Some(true),
     };
 
     Defn {
         kind: DefnKind::ExternFn {
             decl,
+            c: c_kw.is_some(),
             params,
             return_ty_ast: return_type,
             return_ty: Cell::new(None),

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 typedef __int32_t i32;
 typedef __int8_t i8;
@@ -49,6 +50,18 @@ void print_int_slice(slice_ptr /* : *[int] */ s) {
     printf("]\n");
 }
 
+void print_str_slice(slice_ptr /* : *[*str] */ s) {
+    printf("[");
+    if (s.len > 0) {
+        slice_ptr* ptr = s.slice;
+        printf("%.*s", ptr[0].len, (char*) ptr[0].slice);
+        for (i32 i = 1; i < s.len; i++) {
+            printf(", %.*s", ptr[i].len, (char*) ptr[i].slice);
+        }
+    }
+    printf("]\n");
+}
+
 void print(slice_ptr /* : *str */ s) {
     printf("%.*s\n", s.len, (char*) s.slice);
 }
@@ -62,4 +75,16 @@ void for_each(slice_ptr s, void (*action)(void*)) {
     for (i32 i = 0; i < s.len; i++) {
         action(slice[i]);
     }
+}
+
+extern int __crust__main(slice_ptr args);
+
+int main(int argc, char* argv[]) {
+    slice_ptr args[argc];
+
+    for (int i = 0; i < argc; i++) {
+        args[i] = slice_from_raw_parts(argv[i], strlen(argv[i]));
+    }
+    
+    return __crust__main(slice_from_raw_parts(args, argc));
 }

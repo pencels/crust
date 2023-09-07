@@ -189,6 +189,17 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
+    fn add_crust_function(&mut self, name: &str, ty: FunctionType<'ctx>) -> FunctionValue<'ctx> {
+        self.module
+            .add_function(&("__crust__".to_owned() + name), ty, None)
+    }
+
+    fn get_crust_function(&self, name: &str) -> FunctionValue<'ctx> {
+        self.module
+            .get_function(&("__crust__".to_owned() + name))
+            .unwrap()
+    }
+
     fn get_function_type(&self, ty: Type<'_>) -> FunctionType<'ctx> {
         match ty.kind {
             TypeKind::Fn(param_tys, return_ty) => {
@@ -205,6 +216,12 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     fn add_fn_decls(&mut self, defns: &[Defn]) {
         for defn in defns {
+            let extern_c = match &defn.kind {
+                DefnKind::ExternFn { c, .. } => *c,
+                DefnKind::Fn { .. } => false,
+                _ => false,
+            };
+
             match &defn.kind {
                 DefnKind::ExternFn {
                     decl,
@@ -218,7 +235,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     return_ty,
                     ..
                 } => {
-                    let return_ty = return_ty.get().unwrap();
                     let param_types: Vec<_> = params
                         .iter()
                         .map(|param| {
@@ -226,11 +242,20 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                             self.ty_to_ll_type(param_ty).into()
                         })
                         .collect();
-                    self.module.add_function(
-                        decl.name.item(),
-                        self.ty_to_ll_type(return_ty).fn_type(&param_types, false),
-                        None,
-                    );
+                    let return_ty = return_ty.get().unwrap();
+                    let return_ty = if decl.name.item() == &"main" && return_ty.is_unit() {
+                        Type::INT
+                    } else {
+                        return_ty
+                    };
+
+                    let ll_fn_ty = self.ty_to_ll_type(return_ty).fn_type(&param_types, false);
+
+                    if extern_c {
+                        self.module.add_function(decl.name.item(), ll_fn_ty, None);
+                    } else {
+                        self.add_crust_function(decl.name.item(), ll_fn_ty);
+                    }
                 }
                 _ => {}
             }
@@ -255,10 +280,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     /// Emits a function definition.
     fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], ret_ty: &Type, body: &Expr) {
-        let function = self
-            .module
-            .get_function(decl.name.item())
-            .expect("function is declared");
+        let function = self.get_crust_function(decl.name.item());
         self.opt_fn = Some(function);
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -275,7 +297,13 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         let body_ty = body.ty.get().unwrap();
         let body = self.emit_expr(body);
         let body = self.build_conversion(body, body_ty, *ret_ty);
-        self.builder.build_return(Some(&body));
+
+        if decl.name.item() == &"main" && ret_ty == &Type::UNIT {
+            self.builder
+                .build_return(Some(&self.context.i32_type().const_zero()));
+        } else {
+            self.builder.build_return(Some(&body));
+        }
     }
 
     fn alloc_stack_slot(&self, ll_ty: BasicTypeEnum<'ctx>) -> PointerValue<'ctx> {
@@ -412,9 +440,14 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
                 arr.as_basic_value_enum()
             }
-            ExprKind::Id(name, var_id, is_func) => {
-                if is_func.get() {
-                    let func = self.module.get_function(name).unwrap();
+            ExprKind::Id(name, var_id, decl) => {
+                let decl = decl.get().unwrap();
+                if decl.is_fn {
+                    let func = match decl.extern_c {
+                        Some(true) => self.module.get_function(name).unwrap(),
+                        Some(false) => self.get_crust_function(name),
+                        None => unreachable!(),
+                    };
                     func.as_global_value().as_pointer_value().into()
                 } else {
                     let expr_ty = self.ty_to_ll_type(expr.ty.get().unwrap());

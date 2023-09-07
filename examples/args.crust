@@ -1,0 +1,5 @@
+extern "C" fn print_str_slice(strs: *[*str]);
+
+fn main(args: *[*str]) {
+    print_str_slice(args);
+}

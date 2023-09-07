@@ -42,7 +42,7 @@ AtomicExpr: Expr<'b> = {
         }
     },
     BoolExpr,
-    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None), Cell::new(false)), <>),
+    Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None), Cell::new(None)), <>),
     Spanned<Int> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Int(s), <>),
     Spanned<Float> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Float(s), <>),
     Spanned<Char> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Char(s), <>),
@@ -183,7 +183,7 @@ Type: Type<'b> = {
 };
 
 Defn: Defn<'b> = {
-    <@L> "extern" "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> ";" <@R> => ast::make_extern_fn_defn(bump, file_id, <>),
+    <@L> "extern" <("\"C\"")?> "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> ";" <@R> => ast::make_extern_fn_defn(bump, file_id, <>),
     <@L> "fn" <Spanned<Id>> "(" <Delimited<DeclInfo, ",">> ")" <("->" <Type>)?> <BlockExpr> <@R> => ast::make_fn_defn(bump, file_id, <>),
     <@L> "static" <LetDeclInfo> "=" <Expr> ";" <@R> => ast::make_static_defn(bump, file_id, <>),
     StructDefn,
@@ -204,6 +204,8 @@ DeclInfo: DeclInfo<'b> = {
             ty_ast: Some(ty_ast),
             span: Span::new(file_id, l, r),
             id: Cell::new(None),
+            is_fn: false,
+            extern_c: None,
         }
     },
 };
@@ -218,6 +220,8 @@ LetDeclInfo: DeclInfo<'b> = {
             ty_ast,
             span: Span::new(file_id, l, r),
             id: Cell::new(None),
+            is_fn: false,
+            extern_c: None,
         }
     },
 };

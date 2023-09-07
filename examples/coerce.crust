@@ -4,8 +4,10 @@ struct Foo {
     f: fn(int) -> int,
 }
 
-fn main() -> int {
-    let f = 42.0 as double;
-    let s: short = f as short;
-    s
+extern fn printf(s: *char);
+
+fn main() {
+    let p = printf as usize;
+    let print = p as fn(*char);
+    print("hi\n" as *() as *char);
 }

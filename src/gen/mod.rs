@@ -630,7 +630,14 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     .builder
                     .build_int_to_ptr(int_value, self.opaque_ptr_type(), "")
                     .as_basic_value_enum(),
-                TypeKind::Fn(_, _) => todo!(),
+                TypeKind::Fn(_, _) => self
+                    .builder
+                    .build_int_to_ptr(
+                        int_value,
+                        self.ty_to_ll_type(to_ty).ptr_type(AddressSpace::default()),
+                        "",
+                    )
+                    .as_basic_value_enum(),
                 _ => unreachable!("ICE: conversion not supported"),
             },
             BasicValueEnum::FloatValue(float_value) => match to_ty.kind {
@@ -696,25 +703,23 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 TypeKind::Integral(_) => {
                     unreachable!("{}", "ICE: {integer} types should have been resolved")
                 }
-                TypeKind::Short => todo!(),
-                TypeKind::UShort => todo!(),
-                TypeKind::Int => todo!(),
-                TypeKind::UInt => todo!(),
-                TypeKind::Long => todo!(),
-                TypeKind::ULong => todo!(),
-                TypeKind::USize => todo!(),
-                TypeKind::ISize => todo!(),
-                TypeKind::Float => todo!(),
-                TypeKind::Double => todo!(),
-                TypeKind::Byte => todo!(),
-                TypeKind::Char => todo!(),
-                TypeKind::Str => todo!(),
-                TypeKind::Struct(_) => todo!(),
+                TypeKind::Byte
+                | TypeKind::Char
+                | TypeKind::Short
+                | TypeKind::UShort
+                | TypeKind::Int
+                | TypeKind::UInt
+                | TypeKind::Long
+                | TypeKind::ULong
+                | TypeKind::USize
+                | TypeKind::ISize => {
+                    let to_int_type = self.ty_to_ll_type(to_ty).into_int_type();
+                    self.builder
+                        .build_ptr_to_int(ptr_value, to_int_type, "")
+                        .as_basic_value_enum()
+                }
                 TypeKind::Pointer(_, t) if t.is_sized() => ptr_value.as_basic_value_enum(),
-                TypeKind::Slice(_) => todo!(),
-                TypeKind::Array(_, _) => todo!(),
-                TypeKind::Tuple(_) => todo!(),
-                TypeKind::Fn(_, _) => todo!(),
+                TypeKind::Fn(..) => ptr_value.as_basic_value_enum(),
                 _ => unreachable!("ICE: conversion not supported"),
             },
             _ => value,

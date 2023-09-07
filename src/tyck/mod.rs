@@ -1113,9 +1113,15 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         if let TypeKind::Pointer(..) = from_ty.kind && to_ty.is_int() {
             return Ok(to_ty);
         }
+        if let TypeKind::Fn(..) = from_ty.kind && to_ty.is_int() {
+            return Ok(to_ty);
+        }
 
         // Address to pointer cast
         if let TypeKind::Pointer(..) = to_ty.kind && from_ty.is_int() {
+            return Ok(to_ty);
+        }
+        if let TypeKind::Fn(..) = to_ty.kind && from_ty.is_int() {
             return Ok(to_ty);
         }
 

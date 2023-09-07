@@ -22,3 +22,4 @@ inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", feat
 structopt-derive = "0.1.0"
 camino = "1.1.6"
 clap = { version = "4.4.1", features = ["derive"] }
+glob = "0.3.1"

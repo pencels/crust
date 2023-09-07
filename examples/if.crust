@@ -1,0 +1,19 @@
+extern "C" fn print(s: *str);
+
+fn main() {
+    let x = 0;
+    let y = 0;
+    let z = 0;
+
+    let w = if z { "yes" } else { "no" };
+    
+    if x {
+        print("1");
+    } else if y {
+        print("2");
+    } else if z {
+        print("3");
+    }
+
+    print(w);
+}

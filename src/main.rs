@@ -162,6 +162,7 @@ fn compile_file(
     Ok(())
 }
 
+// TODO: for later
 fn phases(paths: Vec<PathBuf>) -> Result<HashMap<String, Vec<Utf8PathBuf>>, Error> {
     let mut map = HashMap::new();
     for path in paths {

@@ -545,12 +545,62 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     _ => self.build_conversion(value, inner_ty, as_ty),
                 }
             }
+            ExprKind::If(thens, last) => {
+                let func = self.opt_fn.unwrap();
+                let if_ty = expr.ty.get().unwrap();
+
+                let dest = self.context.append_basic_block(func, "");
+                let dest_builder = self.context.create_builder();
+                dest_builder.position_at_end(dest);
+                let phi = dest_builder.build_phi(self.ty_to_ll_type(if_ty), "");
+
+                for (cond, then) in thens.iter() {
+                    // Emit cond instrs and coerce to bool
+                    let cond_value = self.emit_expr(cond);
+                    let cond_value =
+                        self.build_conversion(cond_value, cond.ty.get().unwrap(), Type::BOOL);
+
+                    // Branch to either then or cond/else blocks
+                    let then_block = self.context.append_basic_block(func, "");
+                    let cond_or_else_block = self.context.append_basic_block(func, "");
+                    self.builder.build_conditional_branch(
+                        cond_value.into_int_value(),
+                        then_block,
+                        cond_or_else_block,
+                    );
+
+                    // Emit instrs into "then" block and branch to destination phi instr
+                    self.builder.position_at_end(then_block);
+                    let then_value = self.emit_expr(then);
+                    let then_value =
+                        self.build_conversion(then_value, then.ty.get().unwrap(), if_ty);
+                    self.builder.build_unconditional_branch(dest);
+                    phi.add_incoming(&[(&then_value as &dyn BasicValue, then_block)]);
+
+                    // Position builder for next iteration
+                    self.builder.position_at_end(cond_or_else_block);
+                }
+
+                // Last block either has some instrs or results in `()`
+                let else_block = self.builder.get_insert_block().unwrap();
+                let last_value = if let Some(last) = last {
+                    let last_value = self.emit_expr(last);
+                    self.build_conversion(last_value, last.ty.get().unwrap(), if_ty)
+                } else {
+                    self.unit_value()
+                };
+                self.builder.build_unconditional_branch(dest);
+                phi.add_incoming(&[(&last_value as &dyn BasicValue, else_block)]);
+
+                // Instructions continue at the destination block
+                self.builder.position_at_end(dest);
+                phi.as_basic_value()
+            }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
-            // ExprKind::If(_, _) => todo!(),
         }
     }
 

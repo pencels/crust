@@ -4,11 +4,8 @@ struct Foo {
     f: fn(int) -> int,
 }
 
-fn main() {
-    let null: *() = 0;
-    let mut x = Foo {
-        f: null,
-    };
-
-    x.f = foo;
+fn main() -> int {
+    let f = 42.0 as double;
+    let s: short = f as short;
+    s
 }

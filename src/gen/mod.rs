@@ -1,7 +1,7 @@
 use camino::Utf8Path;
 use inkwell::support::LLVMString;
 use inkwell::targets::{InitializationConfig, Target, TargetData};
-use inkwell::types::{BasicTypeEnum, FunctionType, StringRadix, StructType};
+use inkwell::types::{BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, StructType};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
@@ -49,8 +49,14 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     /// Opaque pointer type `ptr`.
     #[inline]
-    fn opaque_ptr_type(&self) -> BasicTypeEnum<'ctx> {
-        self.unit_ty().ptr_type(AddressSpace::default()).into()
+    fn opaque_ptr_type(&self) -> PointerType<'ctx> {
+        self.unit_type().ptr_type(AddressSpace::default())
+    }
+
+    /// Returns the `usize` type equivalent.
+    #[inline]
+    fn size_type(&self) -> IntType<'ctx> {
+        self.context.ptr_sized_int_type(self.target_data, None)
     }
 
     /// Emits LLVM IR for the given program as a `.ll` file.
@@ -94,6 +100,30 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         Ok(())
     }
 
+    fn extract_char_int_value(&self, text: &str) -> u64 {
+        let mut chars = text.chars();
+        match chars.next() {
+            Some(c) => match c {
+                '\\' => match chars.next() {
+                    Some(c) => match c {
+                        'a' => 0x7,
+                        'b' => 0x8,
+                        'f' => 0xc,
+                        'n' => 0xa,
+                        'r' => 0xd,
+                        't' => 0x9,
+                        'v' => 0xb,
+                        '0' => 0,
+                        _ => c as u64,
+                    },
+                    _ => unreachable!(),
+                },
+                c => c as u64,
+            },
+            _ => unreachable!(),
+        }
+    }
+
     fn add_struct_decls(&self) {
         // Forward declare all structs to handle self/cyclical references.
         for (name, _) in &self.struct_infos {
@@ -106,7 +136,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             let field_types: Vec<_> = info
                 .members
                 .iter()
-                .map(|decl| self.ty_to_ll_ty(decl.ty.get().unwrap()))
+                .map(|decl| self.ty_to_ll_type(decl.ty.get().unwrap()))
                 .collect();
 
             ty.set_body(&field_types, false);
@@ -114,18 +144,21 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     /// Unit type `()`.
-    fn unit_ty(&self) -> StructType<'ctx> {
+    fn unit_type(&self) -> StructType<'ctx> {
         self.context.struct_type(&[], false)
     }
 
-    fn generic_slice_ty(&self) -> StructType<'ctx> {
+    fn generic_slice_type(&self) -> StructType<'ctx> {
         self.context.struct_type(
-            &[self.opaque_ptr_type(), self.context.i32_type().into()],
+            &[
+                self.opaque_ptr_type().into(),
+                self.context.i32_type().into(),
+            ],
             false,
         )
     }
 
-    fn ty_to_ll_ty(&self, ty: Type) -> BasicTypeEnum<'ctx> {
+    fn ty_to_ll_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         use TypeKind::*;
         match ty.kind {
             Integral(_) => {
@@ -151,31 +184,31 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     kind: Str | Slice(_),
                     ..
                 },
-            ) => self.generic_slice_ty().into(),
+            ) => self.generic_slice_type().into(),
             Pointer(_, ty) => self
-                .ty_to_ll_ty(*ty)
+                .ty_to_ll_type(*ty)
                 .ptr_type(AddressSpace::default())
                 .into(),
-            Array(ty, size) => self.ty_to_ll_ty(*ty).array_type(size as u32).into(),
+            Array(ty, size) => self.ty_to_ll_type(*ty).array_type(size as u32).into(),
             Tuple(tys) => {
-                let ll_tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_ty(*ty)).collect();
+                let ll_tys: Vec<_> = tys.iter().map(|ty| self.ty_to_ll_type(*ty)).collect();
                 self.context.struct_type(&ll_tys, false).into()
             }
             Fn(..) => self
-                .get_function_ty(ty)
+                .get_function_type(ty)
                 .ptr_type(AddressSpace::default())
                 .into(),
         }
     }
 
-    fn get_function_ty(&self, ty: Type<'_>) -> FunctionType<'ctx> {
+    fn get_function_type(&self, ty: Type<'_>) -> FunctionType<'ctx> {
         match ty.kind {
             TypeKind::Fn(param_tys, return_ty) => {
                 let ll_param_tys: Vec<_> = param_tys
                     .iter()
-                    .map(|ty| self.ty_to_ll_ty(*ty).into())
+                    .map(|ty| self.ty_to_ll_type(*ty).into())
                     .collect();
-                let ll_return_ty = self.ty_to_ll_ty(*return_ty);
+                let ll_return_ty = self.ty_to_ll_type(*return_ty);
                 ll_return_ty.fn_type(&ll_param_tys, false)
             }
             _ => panic!("uh oh not a function"),
@@ -202,12 +235,12 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                         .iter()
                         .map(|param| {
                             let param_ty = param.ty.get().unwrap();
-                            self.ty_to_ll_ty(param_ty).into()
+                            self.ty_to_ll_type(param_ty).into()
                         })
                         .collect();
                     self.module.add_function(
                         decl.name.item(),
-                        self.ty_to_ll_ty(return_ty).fn_type(&param_types, false),
+                        self.ty_to_ll_type(return_ty).fn_type(&param_types, false),
                         None,
                     );
                 }
@@ -221,7 +254,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             DefnKind::Fn {
                 decl, params, body, ..
             } => {
-                self.emit_fn(decl, params, body);
+                let ret_ty = match decl.ty.get().unwrap().kind {
+                    TypeKind::Fn(_, ret_ty) => ret_ty,
+                    _ => panic!("umm should be a fn type"),
+                };
+                self.emit_fn(decl, params, ret_ty, body);
             }
             DefnKind::Static { .. } => todo!("emit static variable definition"),
             _ => {}
@@ -229,7 +266,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     /// Emits a function definition.
-    fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], body: &Expr) {
+    fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], ret_ty: &Type, body: &Expr) {
         let function = self
             .module
             .get_function(decl.name.item())
@@ -247,7 +284,9 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             self.variables.insert(decl.id.get().expect("id"), slot);
         }
 
+        let body_ty = body.ty.get().unwrap();
         let body = self.emit_expr(body);
+        let body = self.build_conversion(body, body_ty, *ret_ty);
         self.builder.build_return(Some(&body));
     }
 
@@ -267,7 +306,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     /// Builds a `*str` fat pointer with the given address (`ptr`) and byte length (`size`).
     fn build_str_slice(&self, ptr: PointerValue<'ctx>, size: usize) -> BasicValueEnum<'ctx> {
-        let mut slice = self.generic_slice_ty().get_undef();
+        let mut slice = self.generic_slice_type().get_undef();
         slice = self
             .builder
             .build_insert_value(slice, ptr, 0, "")
@@ -286,15 +325,56 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         slice.as_basic_value_enum()
     }
 
+    fn int_type(&self, ty: &Type) -> IntType<'ctx> {
+        match ty.kind {
+            TypeKind::Integral(_) => unreachable!("{}", "{integer} should be resolved by now"),
+            TypeKind::Byte | TypeKind::Char => self.context.i8_type(),
+            TypeKind::Short | TypeKind::UShort => self.context.i16_type(),
+            TypeKind::Int | TypeKind::UInt => self.context.i32_type(),
+            TypeKind::Long | TypeKind::ULong => self.context.i32_type(),
+            TypeKind::USize | TypeKind::ISize => {
+                self.context.ptr_sized_int_type(self.target_data, None)
+            }
+            _ => panic!("int_type called on non-int type {:?}", ty.kind),
+        }
+    }
+
     fn emit_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
         match &expr.kind {
             ExprKind::Bool(v) => self.context.bool_type().const_int(*v as u64, false).into(),
-            ExprKind::Int(v) => self
-                .context
-                .i32_type()
-                .const_int_from_string(v, StringRadix::Decimal)
-                .unwrap()
-                .into(),
+            ExprKind::Int(v) => {
+                let ty = expr.ty.get().unwrap();
+                if ty.is_int() {
+                    self.int_type(&expr.ty.get().expect("type should be resolved"))
+                        .const_int_from_string(v, StringRadix::Decimal)
+                        .unwrap()
+                        .into()
+                } else if ty == Type::BOOL {
+                    let val = self
+                        .size_type()
+                        .const_int_from_string(v, StringRadix::Decimal)
+                        .unwrap();
+                    self.builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            val,
+                            self.size_type().const_zero(),
+                            "",
+                        )
+                        .as_basic_value_enum()
+                } else if ty.is_sized_ptr() {
+                    let val = self
+                        .context
+                        .ptr_sized_int_type(self.target_data, None)
+                        .const_int_from_string(v, StringRadix::Decimal)
+                        .unwrap();
+                    self.builder
+                        .build_int_to_ptr(val, self.opaque_ptr_type(), "")
+                        .as_basic_value_enum()
+                } else {
+                    unreachable!("ICE: int literal coerced to invalid type")
+                }
+            }
             ExprKind::Float(v) => self.context.f32_type().const_float_from_string(v).into(),
             ExprKind::Str(s) => {
                 let global = self.builder.build_global_string_ptr(s, "");
@@ -303,11 +383,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             ExprKind::Char(v) => self
                 .context
                 .i8_type()
-                .const_int(v.bytes().nth(0).unwrap() as u64, false)
+                .const_int(self.extract_char_int_value(v), false)
                 .into(),
             ExprKind::Tuple(exprs) => {
                 let mut struct_value = self
-                    .ty_to_ll_ty(expr.ty.get().unwrap())
+                    .ty_to_ll_type(expr.ty.get().unwrap())
                     .into_struct_type()
                     .get_undef();
 
@@ -324,7 +404,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             }
             ExprKind::Array(exprs, size) => {
                 let ty = exprs[0].ty.get().unwrap();
-                let ll_ty = self.ty_to_ll_ty(ty);
+                let ll_ty = self.ty_to_ll_type(ty);
                 let size = size.map(|s| *s.item()).unwrap_or_else(|| exprs.len());
                 let arr_ty = ll_ty.array_type(size as u32);
 
@@ -348,7 +428,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     let func = self.module.get_function(name).unwrap();
                     func.as_global_value().as_pointer_value().into()
                 } else {
-                    let expr_ty = self.ty_to_ll_ty(expr.ty.get().unwrap());
+                    let expr_ty = self.ty_to_ll_type(expr.ty.get().unwrap());
                     let ptr = self.variables.get(&var_id.get().unwrap()).unwrap();
                     self.builder.build_load(expr_ty, *ptr, "")
                 }
@@ -422,7 +502,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let args: Vec<_> = args.iter().map(|arg| self.emit_expr(arg).into()).collect();
                 self.builder
                     .build_indirect_call(
-                        self.get_function_ty(callable.ty.get().unwrap()),
+                        self.get_function_type(callable.ty.get().unwrap()),
                         callee.into_pointer_value(),
                         &args[..],
                         "",
@@ -430,31 +510,24 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     .try_as_basic_value()
                     .left_or(self.unit_value())
             }
-            // ExprKind::Cast(expr, _) => {
-            //     let value = self.emit_expr(expr);
-            //     let expr_ll_ty = self.ty_to_ll_ty(expr.ty.get().unwrap());
+            ExprKind::Cast(inner, _) => {
+                let value = self.emit_expr(inner);
+                let inner_ty = inner.ty.get().unwrap();
+                let as_ty = expr.ty.get().unwrap();
 
-            //     match (value.get_type(), expr.ty.get()) {
-            //         (ty, _) if ty == expr_ll_ty => value,
-            //         (
-            //             BasicTypeEnum::PointerType(_),
-            //             Some(Type {
-            //                 kind: TypeKind::Pointer(_, to_ty),
-            //                 ..
-            //             }),
-            //         ) => self
-            //             .builder
-            //             .build_pointer_cast(
-            //                 value.into_pointer_value(),
-            //                 self.ty_to_ll_ty(*to_ty)
-            //                     .ptr_type(AddressSpace::default())
-            //                     .into(),
-            //                 "",
-            //             )
-            //             .into(),
-            //         _ => unreachable!("only thin pointer casts supported"),
-            //     }
-            // }
+                match (inner_ty.kind, as_ty.kind) {
+                    // Drop fatness (tyck ensures that the to_ty can only be a *())
+                    (TypeKind::Pointer(_, from), TypeKind::Pointer(_, to))
+                        if !from.is_sized() && to.is_sized() =>
+                    {
+                        self.builder
+                            .build_extract_value(value.into_struct_value(), 0, "")
+                            .unwrap()
+                            .into()
+                    }
+                    _ => self.build_conversion(value, inner_ty, as_ty),
+                }
+            }
             _ => self.unit_value(),
             // ExprKind::PrefixOp(_, _) => todo!(),
             // ExprKind::BinOp(_, _, _) => todo!(),
@@ -476,7 +549,9 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         match &stmt.kind {
             StmtKind::Let(decl, expr) => {
                 let value = self.emit_expr(expr);
-                let ty = self.ty_to_ll_ty(decl.ty.get().unwrap());
+                let value =
+                    self.build_conversion(value, expr.ty.get().unwrap(), decl.ty.get().unwrap());
+                let ty = self.ty_to_ll_type(decl.ty.get().unwrap());
                 let slot = self.alloc_stack_slot(ty);
                 self.builder.build_store(slot, value);
                 self.variables.insert(decl.id.get().unwrap(), slot);
@@ -487,6 +562,162 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 self.emit_expr(expr);
                 self.unit_value()
             }
+        }
+    }
+
+    fn build_conversion(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        from_ty: Type,
+        to_ty: Type,
+    ) -> BasicValueEnum<'ctx> {
+        match value {
+            BasicValueEnum::IntValue(int_value) => match to_ty.kind {
+                TypeKind::Bool => self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        int_value,
+                        int_value.get_type().const_int(0, false),
+                        "",
+                    )
+                    .as_basic_value_enum(),
+                TypeKind::Integral(_) => {
+                    unreachable!("{}", "ICE: {integer} types should have been resolved")
+                }
+                TypeKind::Byte
+                | TypeKind::Char
+                | TypeKind::Short
+                | TypeKind::UShort
+                | TypeKind::Int
+                | TypeKind::UInt
+                | TypeKind::Long
+                | TypeKind::ULong
+                | TypeKind::USize
+                | TypeKind::ISize => {
+                    let to_int_type = self.ty_to_ll_type(to_ty).into_int_type();
+                    if int_value.get_type().get_bit_width() > to_int_type.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(int_value, to_int_type, "")
+                            .as_basic_value_enum()
+                    } else {
+                        match from_ty.is_signed() {
+                            Some(true) => self
+                                .builder
+                                .build_int_s_extend(int_value, to_int_type, "")
+                                .as_basic_value_enum(),
+                            Some(false) | None => self
+                                .builder
+                                .build_int_z_extend(int_value, to_int_type, "")
+                                .as_basic_value_enum(),
+                        }
+                    }
+                }
+                TypeKind::Float | TypeKind::Double => {
+                    let to_float_type = self.ty_to_ll_type(to_ty).into_float_type();
+                    match from_ty.is_signed() {
+                        Some(true) => self
+                            .builder
+                            .build_signed_int_to_float(int_value, to_float_type, "")
+                            .as_basic_value_enum(),
+                        Some(false) | None => self
+                            .builder
+                            .build_unsigned_int_to_float(int_value, to_float_type, "")
+                            .as_basic_value_enum(),
+                    }
+                }
+                TypeKind::Pointer(_, ty) if ty.is_sized() => self
+                    .builder
+                    .build_int_to_ptr(int_value, self.opaque_ptr_type(), "")
+                    .as_basic_value_enum(),
+                TypeKind::Fn(_, _) => todo!(),
+                _ => unreachable!("ICE: conversion not supported"),
+            },
+            BasicValueEnum::FloatValue(float_value) => match to_ty.kind {
+                TypeKind::Bool => self
+                    .builder
+                    .build_float_compare(
+                        inkwell::FloatPredicate::UNE,
+                        float_value,
+                        float_value.get_type().const_zero(),
+                        "",
+                    )
+                    .as_basic_value_enum(),
+                TypeKind::Integral(_) => {
+                    unreachable!("{}", "ICE: {integer} types should have been resolved")
+                }
+                TypeKind::Byte
+                | TypeKind::Char
+                | TypeKind::Short
+                | TypeKind::UShort
+                | TypeKind::Int
+                | TypeKind::UInt
+                | TypeKind::Long
+                | TypeKind::ULong
+                | TypeKind::USize
+                | TypeKind::ISize => {
+                    let int_type = self.ty_to_ll_type(to_ty).into_int_type();
+                    match to_ty.is_signed() {
+                        Some(true) => self
+                            .builder
+                            .build_float_to_signed_int(float_value, int_type, "")
+                            .as_basic_value_enum(),
+                        Some(false) => self
+                            .builder
+                            .build_float_to_unsigned_int(float_value, int_type, "")
+                            .as_basic_value_enum(),
+                        None => unreachable!(),
+                    }
+                }
+                TypeKind::Float | TypeKind::Double => {
+                    let to_float_type = self.ty_to_ll_type(to_ty).into_float_type();
+                    if from_ty.bit_width() < to_ty.bit_width() {
+                        self.builder
+                            .build_float_ext(float_value, to_float_type, "")
+                            .as_basic_value_enum()
+                    } else {
+                        self.builder
+                            .build_float_trunc(float_value, to_float_type, "")
+                            .as_basic_value_enum()
+                    }
+                }
+                _ => unreachable!("ICE: conversion not supported"),
+            },
+            BasicValueEnum::PointerValue(ptr_value) => match to_ty.kind {
+                TypeKind::Bool => self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        ptr_value,
+                        self.opaque_ptr_type().const_null(),
+                        "",
+                    )
+                    .as_basic_value_enum(),
+                TypeKind::Integral(_) => {
+                    unreachable!("{}", "ICE: {integer} types should have been resolved")
+                }
+                TypeKind::Short => todo!(),
+                TypeKind::UShort => todo!(),
+                TypeKind::Int => todo!(),
+                TypeKind::UInt => todo!(),
+                TypeKind::Long => todo!(),
+                TypeKind::ULong => todo!(),
+                TypeKind::USize => todo!(),
+                TypeKind::ISize => todo!(),
+                TypeKind::Float => todo!(),
+                TypeKind::Double => todo!(),
+                TypeKind::Byte => todo!(),
+                TypeKind::Char => todo!(),
+                TypeKind::Str => todo!(),
+                TypeKind::Struct(_) => todo!(),
+                TypeKind::Pointer(_, t) if t.is_sized() => ptr_value.as_basic_value_enum(),
+                TypeKind::Slice(_) => todo!(),
+                TypeKind::Array(_, _) => todo!(),
+                TypeKind::Tuple(_) => todo!(),
+                TypeKind::Fn(_, _) => todo!(),
+                _ => unreachable!("ICE: conversion not supported"),
+            },
+            _ => value,
         }
     }
 }

@@ -247,6 +247,13 @@ impl<'a> Type<'a> {
         }
     }
 
+    pub fn is_sized_ptr(&self) -> bool {
+        match self.kind {
+            TypeKind::Pointer(_, t) if t.is_sized() => true,
+            _ => false,
+        }
+    }
+
     pub fn is_int_or_float(&self) -> bool {
         match self.kind {
             TypeKind::Byte
@@ -271,6 +278,28 @@ impl<'a> Type<'a> {
             TypeKind::Slice(_) | TypeKind::Str => false,
             _ => true,
         }
+    }
+
+    pub fn is_signed(&self) -> Option<bool> {
+        use TypeKind::*;
+        match self.kind {
+            Byte | Short | Int | Long | ISize => Some(true),
+            Char | UShort | UInt | ULong | USize => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn bit_width(&self) -> Option<usize> {
+        use TypeKind::*;
+        Some(match self.kind {
+            Bool => 1,
+            Byte | Char => 8,
+            Short | UShort => 16,
+            Int | UInt | Float => 32,
+            Long | ULong | Double => 64,
+            USize | ISize | Pointer(..) => 64, // HACK: hmmm
+            _ => return None,
+        })
     }
 
     pub fn from<'b>(checker: &TypeChecker<'b>, ty: &ast::Type) -> TyckResult<Type<'b>> {
@@ -744,11 +773,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         return_ty_cell: &Cell<Option<Type<'alloc>>>,
         body: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
-        let stmts = match &body.kind {
-            ExprKind::Block(stmts) => stmts,
-            kind => unreachable!("ICE: fn has a non-block body: {:?}", kind),
-        };
-
         self.env.push();
         for param in params {
             param.set_ty(Type::from(
@@ -759,20 +783,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         }
 
         let return_ty = return_ty_ast.map_or(Ok(Type::UNIT), |t| Type::from(self, &t))?;
-        let body_ty = self.tyck_block(stmts)?;
+        self.coerce(body, &return_ty)?;
         self.env.pop();
 
         return_ty_cell.set(Some(return_ty));
-
-        if can_coerce(&body_ty, &return_ty) {
-            Ok(())
-        } else {
-            Err(TyckError::MismatchedTypes {
-                expected_ty: human_type_name(&return_ty),
-                got: stmts.last().map(|s| s.span).unwrap_or(body.span),
-                got_ty: human_type_name(&body_ty),
-            })
-        }
+        Ok(())
     }
 
     /// Attempt to coerce an expression to a type.
@@ -793,7 +808,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 for (expr, target) in exprs.iter().zip(tys) {
                     self.coerce(expr, target)?;
                 }
-                Ok(*to_ty)
             }
             (ExprKind::Array(exprs, expr_size), TypeKind::Array(ty, ty_size)) => {
                 // Each expression in the array literal must be coerceable into the array element type
@@ -815,10 +829,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         num_elements: expr_size,
                     });
                 }
-
-                Ok(*to_ty)
             }
-            (ExprKind::Group(e), _) => self.coerce(e, to_ty),
+            (ExprKind::Group(e), _) => {
+                self.coerce(e, to_ty)?;
+            }
             (ExprKind::Block(stmts), _) => match stmts.last() {
                 // Empty blocks or blocks ending with a non-expr stmt
                 Some(Stmt {
@@ -826,42 +840,46 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     ..
                 })
                 | None => {
-                    if to_ty.is_unit() {
-                        Ok(*to_ty)
-                    } else {
-                        Err(TyckError::CannotCoerceType {
+                    if !to_ty.is_unit() {
+                        return Err(TyckError::CannotCoerceType {
                             expr_span: expr.span,
                             ty_span: to_ty.data,
                             from_ty_name: human_type_name(&from_ty),
                             to_ty_name: human_type_name(&to_ty),
-                        })
+                        });
                     }
                 }
                 Some(Stmt {
                     kind: StmtKind::Expr(e),
                     ..
-                }) => self.coerce(e, to_ty),
+                }) => {
+                    self.coerce(e, to_ty)?;
+                }
             },
             (ExprKind::If(init, Some(last)), _) => {
                 for (_, expr) in *init {
                     self.coerce(expr, to_ty)?;
                 }
                 self.coerce(last, to_ty)?;
-                Ok(*to_ty)
             }
             _ => {
-                if can_coerce(&from_ty, to_ty) {
-                    Ok(*to_ty)
-                } else {
-                    Err(TyckError::CannotCoerceType {
+                if !can_coerce(&from_ty, to_ty) {
+                    return Err(TyckError::CannotCoerceType {
                         expr_span: expr.span,
                         ty_span: to_ty.data,
                         from_ty_name: human_type_name(&from_ty),
                         to_ty_name: human_type_name(&to_ty),
-                    })
+                    });
                 }
             }
+        };
+
+        // Snap integral types to their coerced types
+        if matches!(from_ty.kind, TypeKind::Integral(_)) {
+            expr.ty.set(Some(*to_ty));
         }
+
+        Ok(*to_ty)
     }
 
     fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
@@ -1561,10 +1579,12 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let ty = self.tyck_expr(expr)?;
         let decl_ty = match &decl.ty_ast {
             Some(decl_ty_ast) => self.coerce(expr, &Type::from(self, decl_ty_ast)?)?,
-            None => ty,
+            None => {
+                let ty = self.resolve_integral(&ty)?;
+                expr.ty.set(Some(ty));
+                ty
+            }
         };
-
-        let decl_ty = self.resolve_integral(&decl_ty)?;
 
         decl.set_ty(decl_ty)?;
         self.register_decl(decl);
@@ -1582,28 +1602,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             _ => Ok(*ty),
         }
     }
-}
-
-fn is_signed(ty: Type<'_>) -> Option<bool> {
-    use TypeKind::*;
-    match ty.kind {
-        Byte | Short | Int | Long | ISize => Some(true),
-        Char | UShort | UInt | ULong | USize => Some(false),
-        _ => None,
-    }
-}
-
-fn primitive_bit_width(ty: Type<'_>) -> Option<usize> {
-    use TypeKind::*;
-    Some(match ty.kind {
-        Bool => 1,
-        Byte | Char => 8,
-        Short | UShort => 16,
-        Int | UInt | Float => 32,
-        Long | ULong | Double => 64,
-        USize | ISize | Pointer(..) => 64, // HACK: hmmm
-        _ => return None,
-    })
 }
 
 fn can_coerce(from_ty: &Type<'_>, to_ty: &Type<'_>) -> bool {

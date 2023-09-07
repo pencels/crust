@@ -35,11 +35,10 @@ ExprWithoutBlock = ExprConfig<"S">;
 
 AtomicExpr: Expr<'b> = {
     <l:@L> "(" <e:Expr> ")" <r:@R> => {
-        Expr {
-            kind: ExprKind::Group(bump.alloc(e)),
-            span: Span::new(file_id, l, r),
-            ty: Cell::new(None),
-        }
+        Expr::new(
+            ExprKind::Group(bump.alloc(e)),
+            Span::new(file_id, l, r),
+        )
     },
     BoolExpr,
     Spanned<Id> => ast::make_lit_expr(bump, file_id, |s| ExprKind::Id(s, Cell::new(None), Cell::new(None)), <>),

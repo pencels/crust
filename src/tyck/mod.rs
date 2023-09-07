@@ -862,10 +862,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
         };
 
-        // Snap integral types to their coerced types
-        if matches!(from_ty.kind, TypeKind::Integral(_)) {
-            expr.ty.set(Some(*to_ty));
-        }
+        expr.coerced_ty.set(Some(*to_ty));
 
         Ok(*to_ty)
     }

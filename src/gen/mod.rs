@@ -289,9 +289,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             self.variables.insert(decl.id.get().expect("id"), slot);
         }
 
-        let body_ty = body.ty.get().unwrap();
         let body = self.emit_expr(body);
-        let body = self.build_conversion(body, body_ty, *ret_ty);
 
         if decl.name.item() == &"main" && ret_ty == &Type::UNIT {
             self.builder
@@ -351,12 +349,12 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     fn emit_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
-        match &expr.kind {
+        let value = match &expr.kind {
             ExprKind::Bool(v) => self.context.bool_type().const_int(*v as u64, false).into(),
             ExprKind::Int(v) => {
-                let ty = expr.ty.get().unwrap();
+                let ty = expr.effective_ty().unwrap();
                 if ty.is_int() {
-                    self.int_type(&expr.ty.get().expect("type should be resolved"))
+                    self.int_type(&ty)
                         .const_int_from_string(v, StringRadix::Decimal)
                         .unwrap()
                         .into()
@@ -557,8 +555,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 for (cond, then) in thens.iter() {
                     // Emit cond instrs and coerce to bool
                     let cond_value = self.emit_expr(cond);
-                    let cond_value =
-                        self.build_conversion(cond_value, cond.ty.get().unwrap(), Type::BOOL);
 
                     // Branch to either then or cond/else blocks
                     let then_block = self.context.append_basic_block(func, "");
@@ -572,8 +568,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     // Emit instrs into "then" block and branch to destination phi instr
                     self.builder.position_at_end(then_block);
                     let then_value = self.emit_expr(then);
-                    let then_value =
-                        self.build_conversion(then_value, then.ty.get().unwrap(), if_ty);
                     self.builder.build_unconditional_branch(dest);
                     phi.add_incoming(&[(&then_value as &dyn BasicValue, then_block)]);
 
@@ -584,8 +578,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 // Last block either has some instrs or results in `()`
                 let else_block = self.builder.get_insert_block().unwrap();
                 let last_value = if let Some(last) = last {
-                    let last_value = self.emit_expr(last);
-                    self.build_conversion(last_value, last.ty.get().unwrap(), if_ty)
+                    self.emit_expr(last)
                 } else {
                     self.unit_value()
                 };
@@ -601,6 +594,12 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             // ExprKind::BinOp(_, _, _) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
+        };
+
+        // If there's a coercion, apply type conversion after the main expression has been emitted.
+        match (expr.ty.get(), expr.coerced_ty.get()) {
+            (Some(from_ty), Some(to_ty)) => self.build_conversion(value, from_ty, to_ty),
+            _ => value,
         }
     }
 
@@ -616,8 +615,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         match &stmt.kind {
             StmtKind::Let(decl, expr) => {
                 let value = self.emit_expr(expr);
-                let value =
-                    self.build_conversion(value, expr.ty.get().unwrap(), decl.ty.get().unwrap());
                 let ty = self.ty_to_ll_type(decl.ty.get().unwrap());
                 let slot = self.alloc_stack_slot(ty);
                 self.builder.build_store(slot, value);

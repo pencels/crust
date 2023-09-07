@@ -154,6 +154,22 @@ pub struct Expr<'a> {
     pub span: Span,
     pub kind: ExprKind<'a>,
     pub ty: Cell<Option<tyck::Type<'a>>>,
+    pub coerced_ty: Cell<Option<tyck::Type<'a>>>,
+}
+
+impl Expr<'_> {
+    pub fn new(kind: ExprKind, span: Span) -> Expr {
+        Expr {
+            span,
+            kind,
+            ty: Cell::new(None),
+            coerced_ty: Cell::new(None),
+        }
+    }
+
+    pub fn effective_ty(&self) -> Option<tyck::Type> {
+        self.coerced_ty.get().or(self.ty.get())
+    }
 }
 
 #[derive(Debug)]
@@ -240,11 +256,7 @@ pub fn make_spanned_expr<'b>(
     start: usize,
     end: usize,
 ) -> Expr<'b> {
-    Expr {
-        kind,
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(kind, Span::new(file_id, start, end))
 }
 
 pub fn make_lit_expr<'b, 'input, F>(
@@ -258,11 +270,7 @@ where
 {
     let Spanned(span, s) = s;
     let s = bump.alloc_str(s);
-    Expr {
-        kind: kind(s),
-        span,
-        ty: Cell::new(None),
-    }
+    Expr::new(kind(s), span)
 }
 
 pub fn make_prefix_op_expr<'b>(
@@ -273,11 +281,7 @@ pub fn make_prefix_op_expr<'b>(
 ) -> Expr<'b> {
     let (start, end) = (op.span().start, e.span.end);
     let e = bump.alloc(e);
-    Expr {
-        kind: ExprKind::PrefixOp(op, e),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::PrefixOp(op, e), Span::new(file_id, start, end))
 }
 
 pub fn make_binop_expr<'b>(
@@ -289,11 +293,7 @@ pub fn make_binop_expr<'b>(
 ) -> Expr<'b> {
     let e1 = bump.alloc(e1);
     let e2 = bump.alloc(e2);
-    Expr {
-        kind: ExprKind::BinOp(op, e1, e2),
-        span: e1.span.unite(e2.span),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::BinOp(op, e1, e2), e1.span.unite(e2.span))
 }
 
 pub fn make_cast_expr<'b, 'input>(
@@ -305,11 +305,7 @@ pub fn make_cast_expr<'b, 'input>(
 ) -> Expr<'b> {
     let (start, end) = (expr.span.start, ty.span.end);
     let expr = bump.alloc(expr);
-    Expr {
-        kind: ExprKind::Cast(expr, ty),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::Cast(expr, ty), Span::new(file_id, start, end))
 }
 
 pub fn make_call_expr<'b>(
@@ -322,11 +318,7 @@ pub fn make_call_expr<'b>(
     let (start, end) = (callee.span.start, end_span);
     let callee = bump.alloc(callee);
     let args = bump.alloc_slice_fill_iter(args);
-    Expr {
-        kind: ExprKind::Call(callee, args),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::Call(callee, args), Span::new(file_id, start, end))
 }
 
 pub fn make_index_expr<'b>(
@@ -339,11 +331,10 @@ pub fn make_index_expr<'b>(
     let (start, end) = (lhs.span.start, end_span);
     let lhs = bump.alloc(lhs);
     let index = bump.alloc(index);
-    Expr {
-        kind: ExprKind::Index(lhs, index, Cell::new(0), Cell::new(None)),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(
+        ExprKind::Index(lhs, index, Cell::new(0), Cell::new(None)),
+        Span::new(file_id, start, end),
+    )
 }
 
 pub fn make_range_expr<'b, 'input>(
@@ -355,14 +346,13 @@ pub fn make_range_expr<'b, 'input>(
 ) -> Expr<'b> {
     let start = start.map(|x| &*bump.alloc(x));
     let end = end.map(|x| &*bump.alloc(x));
-    Expr {
-        kind: ExprKind::Range(start, end),
-        span: start
+    Expr::new(
+        ExprKind::Range(start, end),
+        start
             .map(|s| s.span)
             .unwrap_or(op.span())
             .unite(end.map(|e| e.span).unwrap_or(op.span())),
-        ty: Cell::new(None),
-    }
+    )
 }
 
 pub fn make_block_expr<'b>(
@@ -374,11 +364,7 @@ pub fn make_block_expr<'b>(
 ) -> Expr<'b> {
     let stmts = stmts.unwrap_or_else(|| vec![]);
     let stmts = bump.alloc_slice_fill_iter(stmts);
-    Expr {
-        kind: ExprKind::Block(stmts),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::Block(stmts), Span::new(file_id, start, end))
 }
 
 pub fn make_tuple_expr<'b>(
@@ -389,11 +375,7 @@ pub fn make_tuple_expr<'b>(
     end: usize,
 ) -> Expr<'b> {
     let exprs = bump.alloc_slice_fill_iter(exprs);
-    Expr {
-        kind: ExprKind::Tuple(exprs),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::Tuple(exprs), Span::new(file_id, start, end))
 }
 
 pub fn make_array_expr<'b, 'input>(
@@ -413,11 +395,10 @@ pub fn make_array_expr<'b, 'input>(
         }
         None => None,
     };
-    Ok(Expr {
-        kind: ExprKind::Array(exprs, size),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    })
+    Ok(Expr::new(
+        ExprKind::Array(exprs, size),
+        Span::new(file_id, start, end),
+    ))
 }
 
 pub fn make_if_expr<'b>(
@@ -433,11 +414,10 @@ pub fn make_if_expr<'b>(
     inner_ifs.insert(0, (condition, then_block));
     let inner_ifs = bump.alloc_slice_fill_iter(inner_ifs);
     let else_block = bump.alloc(else_block);
-    Expr {
-        kind: ExprKind::If(inner_ifs, else_block),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(
+        ExprKind::If(inner_ifs, else_block),
+        Span::new(file_id, start, end),
+    )
 }
 
 pub fn make_struct_expr<'b, 'input>(
@@ -450,11 +430,7 @@ pub fn make_struct_expr<'b, 'input>(
 ) -> Expr<'b> {
     let id = id.map(|id| &*bump.alloc_str(id));
     let fields = bump.alloc_slice_fill_iter(fields);
-    Expr {
-        kind: ExprKind::Struct(id, fields),
-        span: Span::new(file_id, start, end),
-        ty: Cell::new(None),
-    }
+    Expr::new(ExprKind::Struct(id, fields), Span::new(file_id, start, end))
 }
 
 pub fn make_field_expr<'b, 'input>(
@@ -466,11 +442,10 @@ pub fn make_field_expr<'b, 'input>(
 ) -> Expr<'b> {
     let expr = bump.alloc(expr);
     let field_span = field.span();
-    Expr {
-        kind: ExprKind::Field(expr, op.span(), field, Cell::new(0)),
-        span: expr.span.unite(field_span),
-        ty: Cell::new(None),
-    }
+    Expr::new(
+        ExprKind::Field(expr, op.span(), field, Cell::new(0)),
+        expr.span.unite(field_span),
+    )
 }
 
 // Statement builder functions

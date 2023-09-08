@@ -852,7 +852,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             (ExprKind::Block(stmts), _) => match stmts.last() {
                 // Empty blocks or blocks ending with a non-expr stmt
                 Some(Stmt {
-                    kind: StmtKind::Let(..) | StmtKind::Semi(_),
+                    kind: StmtKind::Let(..) | StmtKind::Semi(_) | StmtKind::While(..),
                     ..
                 })
                 | None => {
@@ -1651,6 +1651,11 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             StmtKind::Expr(expr) => self.tyck_expr(expr),
             StmtKind::Semi(expr) => {
                 self.tyck_expr(expr)?;
+                Ok(Type::UNIT)
+            }
+            StmtKind::While(cond, expr) => {
+                self.coerce(cond, &Type::BOOL)?;
+                self.coerce(expr, &Type::UNIT)?;
                 Ok(Type::UNIT)
             }
         }

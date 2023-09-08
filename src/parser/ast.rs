@@ -107,6 +107,7 @@ pub enum StmtKind<'a> {
     Let(DeclInfo<'a>, Expr<'a>),
     Expr(Expr<'a>),
     Semi(Expr<'a>),
+    While(Expr<'a>, Expr<'a>),
 }
 
 #[derive(Debug)]
@@ -475,6 +476,21 @@ pub fn make_field_expr<'b, 'input>(
 }
 
 // Statement builder functions
+
+pub fn make_while_stmt<'b>(
+    _: &'b Bump,
+    file_id: FileId,
+    start: usize,
+    cond: Expr<'b>,
+    block: Expr<'b>,
+    end: usize,
+) -> Stmt<'b> {
+    let span = Span::new(file_id, start, end);
+    Stmt {
+        kind: StmtKind::While(cond, block),
+        span,
+    }
+}
 
 pub fn make_expr_stmt<'b>(
     _: &'b Bump,

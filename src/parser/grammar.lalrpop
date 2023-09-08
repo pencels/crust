@@ -160,6 +160,7 @@ Stmts: Vec<Stmt<'b>> = {
 Stmt = {
     LetStmt,
     ExprStmt,
+    WhileStmt,
 };
 
 LetStmt: Stmt<'b> = {
@@ -169,6 +170,10 @@ LetStmt: Stmt<'b> = {
 ExprStmt: Stmt<'b> = {
     <ExprWithoutBlock> ";" <@R> => ast::make_expr_stmt(bump, file_id, true, <>),
     <expr:ExprWithBlock> <semi:";"?> <r:@R> => ast::make_expr_stmt(bump, file_id, semi.is_some(), expr, r),
+};
+
+WhileStmt: Stmt<'b> = {
+    <@L> "while" <CondExpr> <BlockExpr> <@R> => ast::make_while_stmt(bump, file_id, <>),
 };
 
 Type: Type<'b> = {

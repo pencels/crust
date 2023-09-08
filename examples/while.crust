@@ -1,0 +1,10 @@
+extern "C" fn print_int(i: int);
+
+fn main() {
+    let mut i = 0;
+    while i < 10 {
+        print_int(i);
+        i = i + 1;
+    }
+}
+

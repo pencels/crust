@@ -862,7 +862,25 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                             "ICE: lazy boolean operators should have been handled already"
                         ),
                     },
-                    Operator::Assign(_) => todo!(),
+                    Operator::Assign(None) => {
+                        let value = self.emit_expr(rhs);
+                        match &lhs.kind {
+                            ExprKind::Tuple(_) => todo!(),
+                            ExprKind::Id(name, id, decl) => {
+                                let id = id.get().unwrap();
+                                let ptr = self.variables.get(&id).unwrap();
+                                self.builder.build_store(*ptr, value);
+                                self.unit_value()
+                            }
+                            ExprKind::PrefixOp(_, _) => todo!(),
+                            ExprKind::BinOp(_, _, _) => todo!(),
+                            ExprKind::Group(_) => todo!(),
+                            ExprKind::Field(_, _, _, _) => todo!(),
+                            ExprKind::Index(_, _, _, _) => todo!(),
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => todo!(),
                 }
             }
             _ => todo!(),
@@ -947,6 +965,30 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             StmtKind::Expr(expr) => self.emit_expr(expr),
             StmtKind::Semi(expr) => {
                 self.emit_expr(expr);
+                self.unit_value()
+            }
+            StmtKind::While(cond, body) => {
+                let func = self.opt_fn.unwrap();
+                let cond_block = self.context.append_basic_block(func, "");
+                let body_block = self.context.append_basic_block(func, "");
+                let dest_block = self.context.append_basic_block(func, "");
+
+                self.builder.build_unconditional_branch(cond_block);
+
+                self.builder.position_at_end(cond_block);
+                let cond_value = self.emit_expr(cond);
+                self.builder.build_conditional_branch(
+                    cond_value.into_int_value(),
+                    body_block,
+                    dest_block,
+                );
+
+                self.builder.position_at_end(body_block);
+                self.emit_expr(body);
+                self.builder.build_unconditional_branch(cond_block);
+
+                self.builder.position_at_end(dest_block);
+
                 self.unit_value()
             }
         }

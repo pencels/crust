@@ -248,4 +248,12 @@ pub enum TyckError {
         #[primary]
         rhs_span: Span,
     },
+
+    #[message = "Not all code paths return a value"]
+    NotAllPathsReturnAValue {
+        #[secondary = "non-unit return type"]
+        ret_ty_span: Span,
+        #[primary = "control reaches end of function without returning a value"]
+        last_stmt_span: Span,
+    },
 }

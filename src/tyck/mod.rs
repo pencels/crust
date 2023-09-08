@@ -567,6 +567,7 @@ pub struct TypeChecker<'alloc> {
     pub func_decl: HashMap<&'alloc str, &'alloc DeclInfo<'alloc>>,
     pub bump: &'alloc Bump,
     pub env: Env<'alloc>,
+    pub return_ty: Option<Type<'alloc>>,
 }
 
 impl<'check, 'alloc> TypeChecker<'alloc> {
@@ -577,6 +578,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             func_decl: hashmap! {},
             bump,
             env: Env::new(),
+            return_ty: None,
         }
     }
 
@@ -668,12 +670,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok(())
             }
             DefnKind::Fn {
+                decl,
                 params,
                 return_ty_ast: return_type,
                 return_ty,
                 body,
                 ..
-            } => self.tyck_fn(params, return_type, &return_ty, body),
+            } => self.tyck_fn(decl, params, return_type, &return_ty, body),
             DefnKind::Static { .. } => todo!("static definitions"),
             DefnKind::ExternFn { .. } => {
                 // Extern fns have no body to typecheck.
@@ -692,6 +695,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
     fn tyck_fn(
         &mut self,
+        decl: &'alloc DeclInfo<'alloc>,
         params: &'alloc [DeclInfo<'alloc>],
         return_ty_ast: &'alloc Option<ast::Type<'alloc>>,
         return_ty_cell: &Cell<Option<Type<'alloc>>>,
@@ -706,8 +710,59 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             self.register_decl(param);
         }
 
-        let return_ty = return_ty_ast.map_or(Ok(Type::UNIT), |t| Type::from(self, &t))?;
-        self.coerce(body, &return_ty)?;
+        let return_ty = return_ty_ast.map_or(
+            Ok(Type {
+                kind: TypeKind::Tuple(&[]),
+                data: decl.span,
+            }),
+            |t| Type::from(self, &t),
+        )?;
+        self.return_ty = Some(return_ty);
+
+        let ExprKind::Block(stmts) = body.kind else {
+            panic!("ICE: fn body is not a block");
+        };
+
+        if let Some((last, init)) = stmts.split_last() {
+            for stmt in init {
+                self.tyck_stmt(stmt)?;
+            }
+
+            // Make sure end of function body returns a value that makes sense
+            match &last.kind {
+                StmtKind::Let(_, _)
+                | StmtKind::Semi(_)
+                | StmtKind::While(_, _)
+                | StmtKind::Return(None) => {
+                    if !return_ty.is_unit() {
+                        return Err(TyckError::NotAllPathsReturnAValue {
+                            ret_ty_span: return_ty.data,
+                            last_stmt_span: last.span,
+                        });
+                    }
+                }
+                StmtKind::Return(Some(e)) | StmtKind::Expr(e) => {
+                    self.coerce(e, &return_ty)?;
+                }
+            }
+        } else {
+            if return_ty.is_unit() {
+                self.coerce(
+                    body,
+                    &Type {
+                        kind: TypeKind::Tuple(&[]),
+                        data: return_ty_ast.map_or(decl.name.span(), |ast| ast.span),
+                    },
+                )?;
+            } else {
+                return Err(TyckError::NotAllPathsReturnAValue {
+                    ret_ty_span: return_ty.data,
+                    last_stmt_span: body.span,
+                });
+            }
+        }
+
+        self.return_ty = None;
         self.env.pop();
 
         return_ty_cell.set(Some(return_ty));
@@ -753,29 +808,60 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             (ExprKind::Group(e), _) => {
                 self.coerce(e, to_ty)?;
             }
-            (ExprKind::Block(stmts), _) => match stmts.last() {
-                // Empty blocks or blocks ending with a non-expr stmt
-                Some(Stmt {
-                    kind: StmtKind::Let(..) | StmtKind::Semi(_) | StmtKind::While(..),
-                    ..
-                })
-                | None => {
-                    if !to_ty.is_unit() {
-                        return Err(TyckError::CannotCoerceType {
-                            expr_span: expr.span,
-                            ty_span: to_ty.data,
-                            from_ty_name: human_type_name(&from_ty),
-                            to_ty_name: human_type_name(&to_ty),
-                        });
+            (ExprKind::Block(stmts), _) => {
+                for stmt in stmts.iter() {
+                    // Type check middle return statements in the block, should match the return type
+                    match stmt {
+                        Stmt {
+                            kind: StmtKind::Return(ret_expr),
+                            ..
+                        } => {
+                            let ret_ty = self.return_ty.unwrap();
+                            match ret_expr {
+                                Some(expr) => {
+                                    self.coerce(expr, &ret_ty)?;
+                                }
+                                None => {
+                                    if !ret_ty.is_unit() {
+                                        return Err(TyckError::CannotCoerceType {
+                                            expr_span: stmt.span,
+                                            ty_span: to_ty.data,
+                                            from_ty_name: human_type_name(&from_ty),
+                                            to_ty_name: human_type_name(&to_ty),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                Some(Stmt {
-                    kind: StmtKind::Expr(e),
-                    ..
-                }) => {
-                    self.coerce(e, to_ty)?;
+
+                match stmts.last() {
+                    // Empty blocks or blocks ending with a non-expr stmt
+                    Some(Stmt {
+                        kind: StmtKind::Let(..) | StmtKind::Semi(_) | StmtKind::While(..),
+                        ..
+                    })
+                    | None => {
+                        if !to_ty.is_unit() {
+                            return Err(TyckError::CannotCoerceType {
+                                expr_span: expr.span,
+                                ty_span: to_ty.data,
+                                from_ty_name: human_type_name(&from_ty),
+                                to_ty_name: human_type_name(&to_ty),
+                            });
+                        }
+                    }
+                    Some(Stmt {
+                        kind: StmtKind::Expr(e),
+                        ..
+                    }) => {
+                        self.coerce(e, to_ty)?;
+                    }
+                    _ => {}
                 }
-            },
+            }
             (ExprKind::If(init, Some(last)), _) => {
                 for (_, expr) in *init {
                     self.coerce(expr, to_ty)?;
@@ -1676,6 +1762,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 self.coerce(expr, &Type::UNIT)?;
                 Ok(Type::UNIT)
             }
+            StmtKind::Return(Some(expr)) => self.tyck_expr(expr),
+            StmtKind::Return(None) => Ok(Type::UNIT),
         }
     }
 

@@ -1,0 +1,36 @@
+extern "C" fn print(s: *str);
+
+fn search(chars: *[char; 10], c: char) -> isize {
+    let mut i: usize = 0;
+
+    while i < 10 {
+        if chars[i] == c {
+            return i as isize;
+        }
+        i = i + 1;
+    }
+
+    -1 as isize
+}
+
+fn main() {
+    let chars = "abcdefghijklmno" as *() as *[char; 10];
+
+    let i = search(chars, 'd');
+
+    if i == 3 {
+        print("yay it works");
+    } else {
+        print("uh oh");
+    }
+
+    print("one");
+    return;
+    print("two");
+    return;
+    print("three");
+    return;
+    return;
+    return;
+    return;
+}

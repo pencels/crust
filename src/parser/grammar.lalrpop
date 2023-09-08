@@ -161,6 +161,7 @@ Stmt = {
     LetStmt,
     ExprStmt,
     WhileStmt,
+    ReturnStmt,
 };
 
 LetStmt: Stmt<'b> = {
@@ -174,6 +175,10 @@ ExprStmt: Stmt<'b> = {
 
 WhileStmt: Stmt<'b> = {
     <@L> "while" <CondExpr> <BlockExpr> <@R> => ast::make_while_stmt(bump, file_id, <>),
+};
+
+ReturnStmt: Stmt<'b> = {
+    <@L> "return" <Expr?> ";" <@R> => ast::make_return_stmt(bump, file_id, <>),
 };
 
 Type: Type<'b> = {

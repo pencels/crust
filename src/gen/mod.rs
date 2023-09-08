@@ -272,11 +272,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             DefnKind::Fn {
                 decl, params, body, ..
             } => {
-                let ret_ty = match decl.ty.get().unwrap().kind {
-                    TypeKind::Fn(_, ret_ty) => ret_ty,
-                    _ => panic!("umm should be a fn type"),
-                };
-                self.emit_fn(decl, params, ret_ty, body);
+                self.emit_fn(decl, params, body);
             }
             DefnKind::Static { .. } => todo!("emit static variable definition"),
             _ => {}
@@ -284,13 +280,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     /// Emits a function definition.
-    fn emit_fn(
-        &mut self,
-        decl: &DeclInfo,
-        params: &[DeclInfo],
-        ret_ty: &Type,
-        body: &Expr<'alloc>,
-    ) {
+    fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], body: &Expr<'alloc>) {
         let function = self
             .get_crust_function(decl.name.item())
             .expect("ICE: crust internal function not found");
@@ -307,13 +297,47 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             self.variables.insert(decl.id.get().expect("id"), slot);
         }
 
-        let body = self.emit_expr(body);
+        let ExprKind::Block(stmts) = body.kind else {
+            panic!("ICE: fn body is not a block");
+        };
 
-        if decl.name.item() == &"main" && ret_ty == &Type::UNIT {
-            self.builder
-                .build_return(Some(&self.context.i32_type().const_zero()));
+        if let Some((last, init)) = stmts.split_last() {
+            for stmt in init {
+                self.emit_stmt(stmt);
+            }
+
+            match &last.kind {
+                StmtKind::While(_, _)
+                | StmtKind::Let(_, _)
+                | StmtKind::Semi(_)
+                | StmtKind::Return(None) => self.build_return(None),
+                StmtKind::Expr(e) | StmtKind::Return(Some(e)) => {
+                    let value = self.emit_expr(e);
+                    self.build_return(Some(value));
+                }
+            };
         } else {
-            self.builder.build_return(Some(&body));
+            self.build_return(None);
+        }
+    }
+
+    fn build_return(&self, value: Option<BasicValueEnum<'ctx>>) {
+        let func = self.opt_fn.unwrap();
+        let name = func.get_name().to_string_lossy();
+
+        match value {
+            Some(value) => {
+                self.builder.build_return(Some(&value));
+            }
+            None => {
+                if name == "__crust__main" {
+                    self.builder.build_return(Some(
+                        &func.get_type().get_return_type().unwrap().const_zero(),
+                    ));
+                } else {
+                    self.builder.build_return(Some(&self.unit_value()));
+                }
+            }
         }
     }
 
@@ -1246,6 +1270,21 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 self.builder.build_unconditional_branch(cond_block);
 
                 self.builder.position_at_end(dest_block);
+
+                self.unit_value()
+            }
+            StmtKind::Return(expr) => {
+                match expr {
+                    Some(expr) => {
+                        let value = self.emit_expr(expr);
+                        self.build_return(Some(value));
+                    }
+                    None => {
+                        self.build_return(None);
+                    }
+                };
+                let drop = self.context.append_basic_block(self.opt_fn.unwrap(), "");
+                self.builder.position_at_end(drop);
 
                 self.unit_value()
             }

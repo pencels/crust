@@ -108,6 +108,7 @@ pub enum StmtKind<'a> {
     Expr(Expr<'a>),
     Semi(Expr<'a>),
     While(Expr<'a>, Expr<'a>),
+    Return(Option<Expr<'a>>),
 }
 
 #[derive(Debug)]
@@ -480,6 +481,20 @@ pub fn make_field_expr<'b, 'input>(
 }
 
 // Statement builder functions
+
+pub fn make_return_stmt<'b>(
+    _: &'b Bump,
+    file_id: FileId,
+    start: usize,
+    expr: Option<Expr<'b>>,
+    end: usize,
+) -> Stmt<'b> {
+    let span = Span::new(file_id, start, end);
+    Stmt {
+        kind: StmtKind::Return(expr),
+        span,
+    }
+}
 
 pub fn make_while_stmt<'b>(
     _: &'b Bump,

@@ -1,4 +1,7 @@
-use crate::util::{FileId, Span};
+use crate::{
+    parser::ast::BinOpKind,
+    util::{FileId, Span},
+};
 use codespan_derive::IntoDiagnostic;
 
 pub type TyckResult<T> = Result<T, TyckError>;
@@ -207,5 +210,25 @@ pub enum TyckError {
         ty_span: Span,
         from_ty_name: String,
         to_ty_name: String,
+    },
+
+    #[message = "Binary operator {op} is undefined for {lhs} and {rhs}"]
+    IncorrectTypesForBinaryOperator {
+        op: BinOpKind,
+        #[primary]
+        span: Span,
+        lhs: String,
+        rhs: String,
+    },
+
+    #[message = "No common type between {lhs} and {rhs}"]
+    #[note = "consider adding an explicit cast"]
+    NoCommonType {
+        lhs: String,
+        #[primary]
+        lhs_span: Span,
+        rhs: String,
+        #[primary]
+        rhs_span: Span,
     },
 }

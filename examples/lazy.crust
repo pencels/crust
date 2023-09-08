@@ -1,0 +1,33 @@
+extern "C" fn print(s: *str);
+
+fn failure() -> bool {
+    print("failure");
+    false
+}
+
+fn success() -> bool {
+    print("success");
+    true
+}
+
+fn yay() -> bool {
+    print("yay");
+    true
+}
+
+fn main() {
+    success() && yay();
+
+    print("=======================");
+
+    failure() && yay();
+
+    print("=======================");
+
+    success() || yay();
+
+    print("=======================");
+
+    failure() || yay();
+}
+

@@ -16,6 +16,7 @@ use inkwell::{
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
 
+use crate::parser::ast::{BinOpKind, Operator};
 use crate::tyck::{Type, TypeKind, VarId};
 use crate::util;
 use crate::{
@@ -380,11 +381,19 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     self.builder
                         .build_int_to_ptr(val, self.opaque_ptr_type(), "")
                         .as_basic_value_enum()
+                } else if ty.is_float() {
+                    let val = self
+                        .size_type()
+                        .const_int_from_string(v, StringRadix::Decimal)
+                        .unwrap();
+                    self.builder
+                        .build_signed_int_to_float(val, self.context.f64_type(), "")
+                        .as_basic_value_enum()
                 } else {
                     unreachable!("ICE: int literal coerced to invalid type")
                 }
             }
-            ExprKind::Float(v) => self.context.f32_type().const_float_from_string(v).into(),
+            ExprKind::Float(v) => self.context.f64_type().const_float_from_string(v).into(),
             ExprKind::Str(s) => {
                 let s = util::escape::unescape(s).unwrap();
                 let global = self.builder.build_global_string_ptr(&s, "");
@@ -589,9 +598,275 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 self.builder.position_at_end(dest);
                 phi.as_basic_value()
             }
-            _ => self.unit_value(),
+            ExprKind::BinOp(op, lhs, rhs) => {
+                let ty = expr.ty.get().unwrap();
+
+                // These operators evaluate the exprs conditionally
+                if let Operator::Simple(op @ (BinOpKind::AmpAmp | BinOpKind::PipePipe)) = op.item()
+                {
+                    let lhs_block = self.builder.get_insert_block().unwrap();
+                    let rhs_block = self.context.append_basic_block(self.opt_fn.unwrap(), "");
+                    let dest_block = self.context.append_basic_block(self.opt_fn.unwrap(), "");
+
+                    let lhs_value = self.emit_expr(lhs);
+                    if op == &BinOpKind::AmpAmp {
+                        self.builder.build_conditional_branch(
+                            lhs_value.into_int_value(),
+                            rhs_block,
+                            dest_block,
+                        );
+                    } else {
+                        self.builder.build_conditional_branch(
+                            lhs_value.into_int_value(),
+                            dest_block,
+                            rhs_block,
+                        );
+                    }
+
+                    self.builder.position_at_end(rhs_block);
+                    let rhs_value = self.emit_expr(rhs);
+                    self.builder.build_unconditional_branch(dest_block);
+
+                    self.builder.position_at_end(dest_block);
+                    let phi = self.builder.build_phi(self.ty_to_ll_type(ty), "");
+                    phi.add_incoming(&[(&lhs_value, lhs_block), (&rhs_value, rhs_block)]);
+                    return phi.as_basic_value();
+                };
+
+                let lhs_value = self.emit_expr(lhs);
+                let rhs_value = self.emit_expr(rhs);
+                match op.item() {
+                    Operator::Simple(op) => match op {
+                        BinOpKind::Plus => {
+                            if ty.is_int() {
+                                self.builder
+                                    .build_int_add(
+                                        lhs_value.into_int_value(),
+                                        rhs_value.into_int_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_float() {
+                                self.builder
+                                    .build_float_add(
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_sized_ptr() {
+                                let (ptr, index) = if lhs.ty.get().unwrap().is_sized_ptr() {
+                                    (lhs_value, rhs_value)
+                                } else {
+                                    (rhs_value, lhs_value)
+                                };
+                                unsafe {
+                                    self.builder
+                                        .build_gep(
+                                            self.ty_to_ll_type(*ty.pointee_ty().unwrap()),
+                                            ptr.into_pointer_value(),
+                                            &[index.into_int_value()],
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                }
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        BinOpKind::Minus => {
+                            if ty == Type::ISIZE {
+                                self.builder
+                                    .build_int_sub(
+                                        lhs_value.into_int_value(),
+                                        rhs_value.into_int_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_int() {
+                                self.builder
+                                    .build_int_sub(
+                                        lhs_value.into_int_value(),
+                                        rhs_value.into_int_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_float() {
+                                self.builder
+                                    .build_float_sub(
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_sized_ptr() {
+                                let rhs_value =
+                                    self.builder.build_int_neg(rhs_value.into_int_value(), "");
+                                unsafe {
+                                    self.builder
+                                        .build_gep(
+                                            self.ty_to_ll_type(*ty.pointee_ty().unwrap()),
+                                            lhs_value.into_pointer_value(),
+                                            &[rhs_value],
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                }
+                            } else {
+                                unreachable!()
+                            }
+                        }
+
+                        BinOpKind::Star => {
+                            if ty.is_int() {
+                                self.builder
+                                    .build_int_mul(
+                                        lhs_value.into_int_value(),
+                                        rhs_value.into_int_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_float() {
+                                self.builder
+                                    .build_float_mul(
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        BinOpKind::Slash => {
+                            if ty.is_int() {
+                                if ty.is_signed().unwrap() {
+                                    self.builder
+                                        .build_int_signed_div(
+                                            lhs_value.into_int_value(),
+                                            rhs_value.into_int_value(),
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                } else {
+                                    self.builder
+                                        .build_int_unsigned_div(
+                                            lhs_value.into_int_value(),
+                                            rhs_value.into_int_value(),
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                }
+                            } else if ty.is_float() {
+                                self.builder
+                                    .build_float_div(
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        BinOpKind::Percent => {
+                            if ty.is_int() {
+                                if ty.is_signed().unwrap() {
+                                    self.builder
+                                        .build_int_signed_rem(
+                                            lhs_value.into_int_value(),
+                                            rhs_value.into_int_value(),
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                } else {
+                                    self.builder
+                                        .build_int_unsigned_rem(
+                                            lhs_value.into_int_value(),
+                                            rhs_value.into_int_value(),
+                                            "",
+                                        )
+                                        .as_basic_value_enum()
+                                }
+                            } else if ty.is_float() {
+                                self.builder
+                                    .build_float_rem(
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        BinOpKind::Caret => self
+                            .builder
+                            .build_xor(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                            .as_basic_value_enum(),
+                        BinOpKind::Amp => self
+                            .builder
+                            .build_and(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                            .as_basic_value_enum(),
+                        BinOpKind::Pipe => self
+                            .builder
+                            .build_or(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
+                            .as_basic_value_enum(),
+                        BinOpKind::LtLt => self
+                            .builder
+                            .build_left_shift(
+                                lhs_value.into_int_value(),
+                                rhs_value.into_int_value(),
+                                "",
+                            )
+                            .as_basic_value_enum(),
+                        BinOpKind::GtGt => self
+                            .builder
+                            .build_right_shift(
+                                lhs_value.into_int_value(),
+                                rhs_value.into_int_value(),
+                                ty.is_signed().unwrap(),
+                                "",
+                            )
+                            .as_basic_value_enum(),
+                        BinOpKind::Lt
+                        | BinOpKind::Le
+                        | BinOpKind::Gt
+                        | BinOpKind::Ge
+                        | BinOpKind::EqEq
+                        | BinOpKind::Ne => {
+                            let ty = lhs.effective_ty().unwrap();
+                            if ty.is_float() {
+                                self.builder
+                                    .build_float_compare(
+                                        self.float_cmp_op(op).unwrap(),
+                                        lhs_value.into_float_value(),
+                                        rhs_value.into_float_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else if ty.is_int() {
+                                self.builder
+                                    .build_int_compare(
+                                        self.int_cmp_op(op, ty.is_signed().unwrap()).unwrap(),
+                                        lhs_value.into_int_value(),
+                                        rhs_value.into_int_value(),
+                                        "",
+                                    )
+                                    .as_basic_value_enum()
+                            } else {
+                                todo!()
+                            }
+                        }
+                        BinOpKind::AmpAmp | BinOpKind::PipePipe => unreachable!(
+                            "ICE: lazy boolean operators should have been handled already"
+                        ),
+                    },
+                    Operator::Assign(_) => todo!(),
+                }
+            }
+            _ => todo!(),
             // ExprKind::PrefixOp(_, _) => todo!(),
-            // ExprKind::BinOp(_, _, _) => todo!(),
             // ExprKind::Field(_, _, _, _) => todo!(),
             // ExprKind::Index(_, _, _, _) => todo!(),
         };
@@ -601,6 +876,54 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             (Some(from_ty), Some(to_ty)) => self.build_conversion(value, from_ty, to_ty),
             _ => value,
         }
+    }
+
+    fn int_cmp_op(&self, op: &BinOpKind, signed: bool) -> Option<inkwell::IntPredicate> {
+        Some(match op {
+            BinOpKind::Lt => {
+                if signed {
+                    inkwell::IntPredicate::SLT
+                } else {
+                    inkwell::IntPredicate::ULT
+                }
+            }
+            BinOpKind::Le => {
+                if signed {
+                    inkwell::IntPredicate::SLE
+                } else {
+                    inkwell::IntPredicate::ULE
+                }
+            }
+            BinOpKind::Gt => {
+                if signed {
+                    inkwell::IntPredicate::SGT
+                } else {
+                    inkwell::IntPredicate::UGT
+                }
+            }
+            BinOpKind::Ge => {
+                if signed {
+                    inkwell::IntPredicate::SGE
+                } else {
+                    inkwell::IntPredicate::UGE
+                }
+            }
+            BinOpKind::EqEq => inkwell::IntPredicate::EQ,
+            BinOpKind::Ne => inkwell::IntPredicate::NE,
+            _ => return None,
+        })
+    }
+
+    fn float_cmp_op(&self, op: &BinOpKind) -> Option<inkwell::FloatPredicate> {
+        Some(match op {
+            BinOpKind::Lt => inkwell::FloatPredicate::OLT,
+            BinOpKind::Le => inkwell::FloatPredicate::OLE,
+            BinOpKind::Gt => inkwell::FloatPredicate::OGT,
+            BinOpKind::Ge => inkwell::FloatPredicate::OGE,
+            BinOpKind::EqEq => inkwell::FloatPredicate::OEQ,
+            BinOpKind::Ne => inkwell::FloatPredicate::ONE,
+            _ => return None,
+        })
     }
 
     fn emit_block(&mut self, stmts: &[Stmt]) -> BasicValueEnum<'ctx> {

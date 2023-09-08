@@ -1,0 +1,7 @@
+fn sub(x: *int, y: *int) -> isize {
+    x - y
+}
+
+fn indexed(x: *int, i: int) -> *int {
+    x + i
+}

@@ -1,0 +1,16 @@
+extern "C" fn printf(s: *char);
+extern "C" fn print(s: *str);
+extern "C" fn print_int(i: int);
+
+fn main() {
+    let x = 1 + 2.5;
+    let y: long = 0;
+    let z = x + y + 40;
+
+    if z == 2.0 {
+        print("it's 2");
+    } else {
+        print_int(z as int);
+    }
+}
+

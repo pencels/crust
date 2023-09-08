@@ -167,6 +167,16 @@ impl<'a> Type<'a> {
         data: Span::dummy(),
     };
 
+    pub const USIZE: Type<'static> = Type {
+        kind: TypeKind::USize,
+        data: Span::dummy(),
+    };
+
+    pub const ISIZE: Type<'static> = Type {
+        kind: TypeKind::ISize,
+        data: Span::dummy(),
+    };
+
     pub const INT: Type<'static> = Type {
         kind: TypeKind::Int,
         data: Span::dummy(),
@@ -235,6 +245,13 @@ impl<'a> Type<'a> {
         }
     }
 
+    pub fn is_float(&self) -> bool {
+        match self.kind {
+            TypeKind::Float | TypeKind::Double => true,
+            _ => false,
+        }
+    }
+
     pub fn is_sized_ptr(&self) -> bool {
         match self.kind {
             TypeKind::Pointer(_, t) if t.is_sized() => true,
@@ -259,6 +276,10 @@ impl<'a> Type<'a> {
             | TypeKind::Char => true,
             _ => false,
         }
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        self.is_int_or_float() || self.is_sized_ptr() || self == &Type::BOOL
     }
 
     pub fn is_sized(&self) -> bool {
@@ -288,6 +309,13 @@ impl<'a> Type<'a> {
             USize | ISize | Pointer(..) => 64, // HACK: hmmm
             _ => return None,
         })
+    }
+
+    pub fn pointee_ty(&self) -> Option<&Type> {
+        match self.kind {
+            TypeKind::Pointer(_, t) => Some(t),
+            _ => None,
+        }
     }
 
     pub fn from<'b>(checker: &TypeChecker<'b>, ty: &ast::Type) -> TyckResult<Type<'b>> {
@@ -871,7 +899,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let ty = match &expr.kind {
             ExprKind::Bool(_) => Ok(Type::new(TypeKind::Bool, expr.span)),
             ExprKind::Int(i) => Ok(Type::new(TypeKind::Integral(i), expr.span)),
-            ExprKind::Float(_) => Ok(Type::new(TypeKind::Float, expr.span)),
+            ExprKind::Float(_) => Ok(Type::new(TypeKind::Double, expr.span)),
             ExprKind::Str(_) => Ok(Type::ptr(
                 false,
                 self.bump.alloc(Type::new(TypeKind::Str, expr.span)),
@@ -955,23 +983,37 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             ExprKind::Block(stmts) => Ok(self.tyck_block(stmts)?),
             ExprKind::If(thens, els) => {
                 let mut results = Vec::new();
-                for (cond, then) in *thens {
+                for (cond, then) in thens.iter() {
                     self.coerce(cond, &Type::new(TypeKind::Bool, cond.span))?;
 
                     let then_ty = self.tyck_expr(then)?;
                     results.push(then_ty);
                 }
 
-                let else_ty = match els {
-                    Some(els) => self.tyck_expr(els)?,
-                    None => Type::UNIT,
+                let common_ty = match els {
+                    Some(els) => {
+                        let else_ty = self.tyck_expr(els)?;
+                        results.push(else_ty);
+                        match results.iter().fold(Some(&results[0]), |acc, x| {
+                            acc.and_then(|acc| common_type(acc, x))
+                        }) {
+                            Some(t) => t,
+                            None => {
+                                return Err(TyckError::MismatchedIfBranchTypes { span: expr.span })
+                            }
+                        }
+                    }
+                    None => &Type::UNIT,
                 };
 
-                if !results.iter().all(|&ty| ty == else_ty) {
-                    return Err(TyckError::MismatchedIfBranchTypes { span: expr.span });
+                for (_, then) in thens.iter() {
+                    self.coerce(then, common_ty)?;
+                }
+                if let Some(els) = els {
+                    self.coerce(els, common_ty)?;
                 }
 
-                Ok(else_ty)
+                Ok(*common_ty)
             }
             ExprKind::Struct(Spanned(struct_name_span, struct_name), fields) => {
                 let info = match self
@@ -1195,11 +1237,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
         let Spanned(op_span, op) = op;
         let rhs_ty = match op {
-            Some(op) => self.tyck_simple_binop_types(
-                Spanned(op_span, op),
-                Spanned(lhs.span, lhs_ty),
-                Spanned(rhs.span, rhs_ty),
-            )?,
+            Some(op) => self.tyck_simple_binop_expr(Spanned(op_span, op), lhs, rhs)?,
             None => rhs_ty,
         };
 
@@ -1222,126 +1260,6 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         }
     }
 
-    fn tyck_simple_binop_types(
-        &mut self,
-        op: Spanned<BinOpKind>,
-        Spanned(lhs_span, lhs_ty): Spanned<Type<'alloc>>,
-        Spanned(rhs_span, rhs_ty): Spanned<Type<'alloc>>,
-    ) -> TyckResult<Type<'alloc>> {
-        let Spanned(_, op) = op;
-        match op {
-            // Additive operations
-            BinOpKind::Plus | BinOpKind::Minus => match lhs_ty.kind {
-                TypeKind::Int | TypeKind::Float | TypeKind::USize => {
-                    tyck_is_scalar_value(Spanned(rhs_span, &rhs_ty))?;
-                    if lhs_ty != rhs_ty {
-                        return Err(TyckError::MismatchedTypes {
-                            expected_ty: human_type_name(&lhs_ty),
-                            got: rhs_span,
-                            got_ty: human_type_name(&rhs_ty),
-                        });
-                    }
-                    Ok(lhs_ty)
-                }
-                _ => {
-                    return Err(TyckError::MismatchedTypes {
-                        expected_ty: "'int' or 'float'".to_string(),
-                        got: lhs_span,
-                        got_ty: human_type_name(&lhs_ty),
-                    })
-                }
-            },
-
-            // Multiplicative operations
-            BinOpKind::Star | BinOpKind::Slash | BinOpKind::Percent => {
-                tyck_is_scalar_value(Spanned(lhs_span, &lhs_ty))?;
-                tyck_is_scalar_value(Spanned(rhs_span, &rhs_ty))?;
-                // if lhs_ty != rhs_ty {
-                //     return Err(TyckError::MismatchedTypes {
-                //         expected_ty: human_type_name(&lhs_ty),
-                //         got: rhs_span,
-                //         got_ty: human_type_name(&rhs_ty),
-                //     });
-                // }
-                Ok(lhs_ty)
-            }
-
-            // Bit operations
-            BinOpKind::Caret | BinOpKind::Amp | BinOpKind::Pipe => {
-                tyck_is_int_value(Spanned(lhs_span, &lhs_ty))?;
-                tyck_is_int_value(Spanned(rhs_span, &rhs_ty))?;
-                if lhs_ty != rhs_ty {
-                    return Err(TyckError::MismatchedTypes {
-                        expected_ty: human_type_name(&lhs_ty),
-                        got: rhs_span,
-                        got_ty: human_type_name(&rhs_ty),
-                    });
-                }
-                Ok(lhs_ty)
-            }
-
-            // Shifts
-            BinOpKind::LtLt | BinOpKind::GtGt => {
-                tyck_is_int_value(Spanned(lhs_span, &lhs_ty))?;
-                tyck_is_int_value(Spanned(rhs_span, &rhs_ty))?;
-                Ok(lhs_ty)
-            }
-
-            // Bool operations
-            BinOpKind::AmpAmp | BinOpKind::PipePipe => {
-                tyck_is_of_type(
-                    Spanned(lhs_span, &lhs_ty),
-                    &[Type::new_dummy(TypeKind::Bool)],
-                )?;
-                tyck_is_of_type(
-                    Spanned(rhs_span, &rhs_ty),
-                    &[Type::new_dummy(TypeKind::Bool)],
-                )?;
-                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
-            }
-
-            // Comparison operations
-            BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge => {
-                if !is_comparable(&lhs_ty) {
-                    return Err(TyckError::TypeNotComparable {
-                        ty_span: lhs_span,
-                        ty_name: human_type_name(&lhs_ty),
-                    });
-                }
-
-                if !is_comparable(&rhs_ty) {
-                    return Err(TyckError::TypeNotComparable {
-                        ty_span: rhs_span,
-                        ty_name: human_type_name(&rhs_ty),
-                    });
-                }
-
-                if lhs_ty != rhs_ty {
-                    return Err(TyckError::MismatchedTypes {
-                        expected_ty: human_type_name(&lhs_ty),
-                        got: rhs_span,
-                        got_ty: human_type_name(&rhs_ty),
-                    });
-                }
-
-                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
-            }
-
-            // Equality operations
-            BinOpKind::EqEq | BinOpKind::Ne => {
-                if lhs_ty != rhs_ty {
-                    return Err(TyckError::MismatchedTypes {
-                        expected_ty: human_type_name(&lhs_ty),
-                        got: rhs_span,
-                        got_ty: human_type_name(&rhs_ty),
-                    });
-                }
-
-                Ok(Type::new(TypeKind::Bool, lhs_span.unite(rhs_span)))
-            }
-        }
-    }
-
     fn tyck_simple_binop_expr(
         &mut self,
         op: Spanned<BinOpKind>,
@@ -1350,7 +1268,183 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     ) -> TyckResult<Type<'alloc>> {
         let lhs_ty = self.tyck_expr(lhs)?;
         let rhs_ty = self.tyck_expr(rhs)?;
-        self.tyck_simple_binop_types(op, Spanned(lhs.span, lhs_ty), Spanned(rhs.span, rhs_ty))
+
+        match op.item() {
+            BinOpKind::Plus => {
+                if lhs_ty.is_int_or_float() && rhs_ty.is_int_or_float() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(*common_ty)
+                        }
+                        None => Err(TyckError::NoCommonType {
+                            lhs: human_type_name(&lhs_ty),
+                            lhs_span: lhs.span,
+                            rhs: human_type_name(&rhs_ty),
+                            rhs_span: rhs.span,
+                        }),
+                    }
+                } else if lhs_ty.is_sized_ptr() && rhs_ty.is_int() {
+                    self.coerce(rhs, &Type::ISIZE)?;
+                    Ok(lhs_ty)
+                } else if rhs_ty.is_sized_ptr() && lhs_ty.is_int() {
+                    self.coerce(lhs, &Type::ISIZE)?;
+                    Ok(rhs_ty)
+                } else {
+                    Err(TyckError::IncorrectTypesForBinaryOperator {
+                        op: BinOpKind::Plus,
+                        span: lhs.span.unite(rhs.span),
+                        lhs: human_type_name(&lhs_ty),
+                        rhs: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+            BinOpKind::Minus => {
+                if lhs_ty.is_int_or_float() && rhs_ty.is_int_or_float() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(*common_ty)
+                        }
+                        None => Err(TyckError::MismatchedTypes {
+                            expected_ty: human_type_name(&lhs_ty),
+                            got: rhs.span,
+                            got_ty: human_type_name(&rhs_ty),
+                        }),
+                    }
+                } else if lhs_ty.is_sized_ptr() && rhs_ty.is_int() {
+                    self.coerce(rhs, &Type::ISIZE)?;
+                    Ok(lhs_ty)
+                } else if lhs_ty.is_sized_ptr() && rhs_ty.is_sized_ptr() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(Type::ISIZE)
+                        }
+                        None => Err(TyckError::MismatchedTypes {
+                            expected_ty: human_type_name(&lhs_ty),
+                            got: rhs.span,
+                            got_ty: human_type_name(&rhs_ty),
+                        }),
+                    }
+                } else {
+                    Err(TyckError::IncorrectTypesForBinaryOperator {
+                        op: *op.item(),
+                        span: lhs.span.unite(rhs.span),
+                        lhs: human_type_name(&lhs_ty),
+                        rhs: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+
+            BinOpKind::Caret | BinOpKind::Amp | BinOpKind::Pipe => {
+                if lhs_ty.is_int() && rhs_ty.is_int() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(*common_ty)
+                        }
+                        None => Err(TyckError::MismatchedTypes {
+                            expected_ty: human_type_name(&lhs_ty),
+                            got: rhs.span,
+                            got_ty: human_type_name(&rhs_ty),
+                        }),
+                    }
+                } else if lhs_ty == Type::BOOL && rhs_ty == Type::BOOL {
+                    Ok(Type::BOOL)
+                } else {
+                    Err(TyckError::IncorrectTypesForBinaryOperator {
+                        op: *op.item(),
+                        span: lhs.span.unite(rhs.span),
+                        lhs: human_type_name(&lhs_ty),
+                        rhs: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+
+            BinOpKind::LtLt | BinOpKind::GtGt => {
+                if lhs_ty.is_int() && rhs_ty.is_int() {
+                    self.coerce(rhs, &Type::USIZE)?;
+                    Ok(lhs_ty)
+                } else if !lhs_ty.is_int() {
+                    Err(TyckError::MismatchedTypes {
+                        expected_ty: "an integer type".to_owned(),
+                        got: lhs.span,
+                        got_ty: human_type_name(&lhs_ty),
+                    })
+                } else {
+                    Err(TyckError::MismatchedTypes {
+                        expected_ty: human_type_name(&Type::USIZE),
+                        got: rhs.span,
+                        got_ty: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+
+            BinOpKind::AmpAmp | BinOpKind::PipePipe => {
+                self.coerce(lhs, &Type::BOOL)?;
+                self.coerce(rhs, &Type::BOOL)?;
+                Ok(Type::BOOL)
+            }
+
+            BinOpKind::Star | BinOpKind::Slash | BinOpKind::Percent => {
+                if lhs_ty.is_int_or_float() && rhs_ty.is_int_or_float() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(*common_ty)
+                        }
+                        None => Err(TyckError::NoCommonType {
+                            lhs: human_type_name(&lhs_ty),
+                            lhs_span: lhs.span,
+                            rhs: human_type_name(&rhs_ty),
+                            rhs_span: rhs.span,
+                        }),
+                    }
+                } else {
+                    Err(TyckError::IncorrectTypesForBinaryOperator {
+                        op: *op.item(),
+                        span: lhs.span.unite(rhs.span),
+                        lhs: human_type_name(&lhs_ty),
+                        rhs: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+
+            BinOpKind::Lt
+            | BinOpKind::Le
+            | BinOpKind::Gt
+            | BinOpKind::Ge
+            | BinOpKind::EqEq
+            | BinOpKind::Ne => {
+                if lhs_ty.is_scalar() && rhs_ty.is_scalar() {
+                    match common_type(&lhs_ty, &rhs_ty) {
+                        Some(common_ty) => {
+                            self.coerce(lhs, &common_ty)?;
+                            self.coerce(rhs, &common_ty)?;
+                            Ok(*common_ty)
+                        }
+                        None => Err(TyckError::MismatchedTypes {
+                            expected_ty: human_type_name(&lhs_ty),
+                            got: rhs.span,
+                            got_ty: human_type_name(&rhs_ty),
+                        }),
+                    }
+                } else {
+                    Err(TyckError::IncorrectTypesForBinaryOperator {
+                        op: *op.item(),
+                        span: lhs.span.unite(rhs.span),
+                        lhs: human_type_name(&lhs_ty),
+                        rhs: human_type_name(&rhs_ty),
+                    })
+                }
+            }
+        }
     }
 
     fn tyck_prefix_op_expr(
@@ -1567,13 +1661,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         decl: &'alloc ast::DeclInfo<'alloc>,
         expr: &'alloc Expr<'alloc>,
     ) -> TyckResult<()> {
-        let ty = self.tyck_expr(expr)?;
         let decl_ty = match &decl.ty_ast {
             Some(decl_ty_ast) => self.coerce(expr, &Type::from(self, decl_ty_ast)?)?,
             None => {
-                let ty = self.resolve_integral(&ty)?;
-                expr.ty.set(Some(ty));
-                ty
+                let ty = self.tyck_expr(expr)?;
+                let ty = resolve_integral(&ty);
+                expr.ty.set(Some(*ty));
+                *ty
             }
         };
 
@@ -1582,16 +1676,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
         Ok(())
     }
+}
 
-    /// Resolve the given type (if it's an indefinite integer type) to `int`
-    fn resolve_integral(&self, ty: &Type<'alloc>) -> TyckResult<Type<'alloc>> {
-        match ty.kind {
-            TypeKind::Integral(_) => Ok(Type {
-                kind: TypeKind::Int,
-                data: ty.data,
-            }),
-            _ => Ok(*ty),
-        }
+/// Resolve the given type (if it's an indefinite integer type) to `int`
+fn resolve_integral<'b, 'alloc>(ty: &'b Type<'alloc>) -> &'b Type<'alloc> {
+    match ty.kind {
+        TypeKind::Integral(_) => &Type::INT,
+        _ => ty,
     }
 }
 
@@ -1672,12 +1763,27 @@ fn can_coerce(from_ty: &Type<'_>, to_ty: &Type<'_>) -> bool {
         Char => Short | Int | Long | ISize | UShort | UInt | ULong | USize | Float | Double,
         Short => Int | Long | ISize | Float | Double,
         UShort => Int | Long | ISize | UInt | ULong | USize | Float | Double,
-        Int => Long | Float | Double,
-        UInt => Long | ULong | Float | Double,
+        Int => Long | ISize | Float | Double,
+        UInt => Long | ULong | USize | Float | Double,
         Long => Float | Double,
         ULong => Float | Double,
         Float => Double,
         Pointer(_, x) => Pointer(false, y) if x == y,
         Fn(..) => Pointer(false, to_ty @ Type { kind: Fn(..), .. }) if can_coerce(from_ty, to_ty),
     }
+}
+
+fn common_type<'b, 'alloc>(
+    lhs_ty: &'b Type<'alloc>,
+    rhs_ty: &'b Type<'alloc>,
+) -> Option<&'b Type<'alloc>> {
+    let result = if can_coerce(rhs_ty, lhs_ty) {
+        Some(lhs_ty)
+    } else if can_coerce(lhs_ty, rhs_ty) {
+        Some(rhs_ty)
+    } else {
+        None
+    };
+
+    result.map(|t| resolve_integral(t))
 }

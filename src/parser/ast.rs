@@ -1,5 +1,5 @@
 use bumpalo::Bump;
-use std::{cell::Cell, str::FromStr};
+use std::{cell::Cell, fmt::Display, str::FromStr};
 
 use crate::{
     tyck::{self, result::TyckError, VarId},
@@ -178,7 +178,7 @@ pub enum Operator {
     Assign(Option<BinOpKind>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BinOpKind {
     Plus,
     Minus,
@@ -201,6 +201,32 @@ pub enum BinOpKind {
     Ge,
     EqEq,
     Ne,
+}
+
+impl Display for BinOpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BinOpKind::Plus => "+",
+            BinOpKind::Minus => "-",
+            BinOpKind::Star => "*",
+            BinOpKind::Slash => "/",
+            BinOpKind::Percent => "%",
+            BinOpKind::Caret => "^",
+            BinOpKind::Amp => "&",
+            BinOpKind::Pipe => "|",
+            BinOpKind::AmpAmp => "&&",
+            BinOpKind::PipePipe => "||",
+            BinOpKind::Lt => "<",
+            BinOpKind::LtLt => "<<",
+            BinOpKind::Le => "<=",
+            BinOpKind::Gt => ">",
+            BinOpKind::GtGt => ">>",
+            BinOpKind::Ge => ">=",
+            BinOpKind::EqEq => "==",
+            BinOpKind::Ne => "!=",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

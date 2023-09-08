@@ -967,32 +967,6 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
-    // fn promote_fat_pointer(
-    //     &self,
-    //     ptr: PointerValue<'ctx>,
-    //     ty: Type<'alloc>,
-    // ) -> (PointerValue<'ctx>, Option<IntValue<'ctx>>) {
-    //     match ty.kind {
-    //         TypeKind::Array(_, n) => (ptr, Some(self.size_type().const_int(n as u64, false))),
-    //         TypeKind::Pointer(..) => {
-    //             if ty.is_sized_ptr() {
-    //                 (ptr, None)
-    //             } else {
-    //                 let ptr = self
-    //                     .builder
-    //                     .build_extract_value(val.into_struct_value(), 0, "")
-    //                     .unwrap();
-    //                 let size = self
-    //                     .builder
-    //                     .build_extract_value(val.into_struct_value(), 1, "")
-    //                     .unwrap();
-    //                 (ptr.into_pointer_value(), Some(size.into_int_value()))
-    //             }
-    //         }
-    //         _ => (ptr, None),
-    //     }
-    // }
-
     fn emit_place_expr(
         &mut self,
         expr: &Expr<'alloc>,
@@ -1031,6 +1005,13 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             ExprKind::Index(lhs, index, autoderef) => {
                 let (mut ptr, metadata) = self.emit_place_expr(lhs);
                 let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
+
+                let num_derefs = if autoderef_ty.is_slice_ptr() {
+                    num_derefs.saturating_sub(1)
+                } else {
+                    num_derefs
+                };
+
                 for _ in 0..num_derefs {
                     ptr = self
                         .builder
@@ -1041,9 +1022,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let index_value = self.emit_expr(index);
 
                 if expr.ty.get().unwrap().is_sized() {
+                    let pointee_ty = self.pointee_ty(autoderef_ty);
+                    let (ptr, _) = self.get_data_ptr(&autoderef_ty, ptr, metadata);
                     let ptr = unsafe {
                         self.builder.build_gep(
-                            self.ty_to_ll_type(autoderef_ty),
+                            pointee_ty,
                             ptr,
                             &[self.size_type().const_zero(), index_value.into_int_value()],
                             "",
@@ -1074,6 +1057,32 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
+    fn get_data_ptr(
+        &self,
+        ty: &Type<'alloc>,
+        parent_ptr: PointerValue<'ctx>,
+        parent_metadata: Option<IntValue<'ctx>>,
+    ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        match parent_metadata {
+            Some(size) => (parent_ptr, size),
+            None => match ty.kind {
+                TypeKind::Array(_, size) => {
+                    (parent_ptr, self.size_type().const_int(size as u64, false))
+                }
+                TypeKind::Pointer(_, t) if !t.is_sized() => {
+                    let val = self
+                        .builder
+                        .build_load(self.generic_slice_type(), parent_ptr, "")
+                        .into_struct_value();
+                    let ptr = self.builder.build_extract_value(val, 0, "").unwrap();
+                    let size = self.builder.build_extract_value(val, 1, "").unwrap();
+                    (ptr.into_pointer_value(), size.into_int_value())
+                }
+                _ => panic!("ICE: slicing a place which is not an array or slice pointer itself"),
+            },
+        }
+    }
+
     fn calculate_slice(
         &self,
         ty: Type<'alloc>,
@@ -1092,22 +1101,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         let pointee_ty = self.pointee_ty(ty);
 
         // Extract the size (number of elements) of the parent slice or array
-        let (ptr, size) = match metadata {
-            Some(size) => (ptr, size),
-            None => match ty.kind {
-                TypeKind::Array(_, size) => (ptr, self.size_type().const_int(size as u64, false)),
-                TypeKind::Pointer(_, t) if !t.is_sized() => {
-                    let val = self
-                        .builder
-                        .build_load(self.generic_slice_type(), ptr, "")
-                        .into_struct_value();
-                    let ptr = self.builder.build_extract_value(val, 0, "").unwrap();
-                    let size = self.builder.build_extract_value(val, 1, "").unwrap();
-                    (ptr.into_pointer_value(), size.into_int_value())
-                }
-                _ => panic!("ICE: slicing a place which is not an array or slice pointer itself"),
-            },
-        };
+        let (ptr, size) = self.get_data_ptr(&ty, ptr, metadata);
 
         // Calculate the offset and the new size given the index
         let (offset, new_size) = match name {

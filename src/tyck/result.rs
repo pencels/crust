@@ -51,6 +51,17 @@ pub enum TyckError {
         source: Span,
     },
 
+    #[message = "Cannot make a mut pointer to an immutable location"]
+    #[note = "add a cast or modify the source type declaration"]
+    MutPointerToNonMutExpr {
+        #[primary]
+        addressing_op: Span,
+        #[secondary = "this place expression is immutable"]
+        location: Span,
+        #[secondary = "immutable type declared here"]
+        source: Span,
+    },
+
     #[message = "Type '{name}' is not defined anywhere"]
     UndefinedType {
         #[primary]
@@ -132,15 +143,15 @@ pub enum TyckError {
 
     #[message = "Cannot mutate immmutable value"]
     MutatingImmutableValueThroughPointer {
-        #[secondary]
+        #[primary]
         span: Span,
-        #[primary = "consider making this a mutable pointer"]
+        #[secondary = "consider making this a mutable pointer"]
         ptr: Span,
     },
 
     #[message = "Cannot mutate immutable value"]
     MutatingImmutableValueOfUnknownCause {
-        #[primary = "figure it out you stupid binch"]
+        #[primary]
         span: Span,
     },
 

@@ -29,6 +29,7 @@ pub const RANGE_FULL_TY_NAME: &str = "RangeFull";
 enum Source {
     Id(Span),
     Ptr(Span),
+    Expr(Span),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +245,13 @@ impl<'a> Type<'a> {
     pub fn is_sized_ptr(&self) -> bool {
         match self.kind {
             TypeKind::Pointer(_, t) if t.is_sized() => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_slice_ptr(&self) -> bool {
+        match self.kind {
+            TypeKind::Pointer(_, t) if !t.is_sized() => true,
             _ => false,
         }
     }
@@ -1213,7 +1221,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         ptr: s,
                     })
                 }
-                None => {
+                _ => {
                     return Err(TyckError::MutatingImmutableValueOfUnknownCause { span: lhs.span })
                 }
             }
@@ -1466,9 +1474,42 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                                 source: s,
                             })
                         }
+                        Source::Expr(s) => Err(TyckError::MutPointerToNonMutExpr {
+                            addressing_op: op_span,
+                            location: expr.span,
+                            source: s,
+                        }),
                     }
                 }
             }
+        }
+    }
+
+    fn mutability_from_ty(&self, ty: &Type<'alloc>) -> (bool, Option<Source>) {
+        match ty.kind {
+            TypeKind::Pointer(m, _) => (m, Some(Source::Expr(ty.data))),
+            _ => (false, None),
+        }
+    }
+
+    fn mutability(&self, expr: &Expr<'alloc>) -> (bool, Option<Source>) {
+        match &expr.kind {
+            ExprKind::Id(_, _, decl) => {
+                let (inner_mut, source) = self.mutability_from_ty(&expr.ty.get().unwrap());
+                let decl = decl.get().unwrap();
+                if source.is_some() {
+                    (inner_mut, source)
+                } else {
+                    (decl.mutable, Some(Source::Id(decl.span)))
+                }
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Amp), inner) => {
+                (false, Some(Source::Ptr(inner.span)))
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::AmpMut), inner) => {
+                (true, Some(Source::Ptr(inner.span)))
+            }
+            _ => self.mutability_from_ty(&expr.ty.get().unwrap()),
         }
     }
 
@@ -1491,21 +1532,23 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
                 let expr_ty = self.tyck_expr(expr)?;
+                let (m, source) = self.mutability(expr);
                 match expr_ty.kind {
-                    TypeKind::Pointer(m, ty) => Ok((m, Some(Source::Ptr(expr.span)), *ty)),
+                    TypeKind::Pointer(_, ty) => Ok((m, source, *ty)),
                     _ => return Err(TyckError::DereferencingNonPointer { span: expr.span }),
                 }
             }
-            ExprKind::Field(expr, _, field, autoderef) => {
-                let (place_mut, source, expr_ty) = self.tyck_place_expr(expr)?;
-                let (n, ptr_mut, ty) = autoderef_place_ptr(expr_ty);
+            ExprKind::Field(lhs, _, field, autoderef) => {
+                let lhs_ty = self.tyck_expr(lhs)?;
+                let (place_mut, source) = self.mutability(lhs);
+                let (n, ptr_mut, ty) = autoderef_place_ptr(lhs_ty);
                 autoderef.set(Some((n, ty)));
-                let result_ty = self.field_access_ty(Spanned(expr.span, ty), field)?;
+                let result_ty = self.field_access_ty(Spanned(lhs.span, ty), field)?;
 
                 Ok((
                     if n > 0 { ptr_mut } else { place_mut },
                     if n > 0 {
-                        Some(Source::Ptr(expr.span))
+                        Some(Source::Ptr(lhs.span))
                     } else {
                         source
                     },
@@ -1514,7 +1557,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
             ExprKind::Group(expr) => self.tyck_place_expr(expr),
             ExprKind::Index(lhs, index, autoderef) => {
-                let (place_mut, source, lhs_ty) = self.tyck_place_expr(lhs)?;
+                let lhs_ty = self.tyck_expr(lhs)?;
+                let (place_mut, source) = self.mutability(lhs);
                 let (n, ptr_mut, ty) = autoderef_place_ptr(lhs_ty);
                 autoderef.set(Some((n, ty)));
                 let index_ty = self.tyck_expr(index)?;
@@ -1529,7 +1573,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     place_ty,
                 ))
             }
-            _ => Err(TyckError::CannotAssignToExpr { span: expr.span }),
+            _ => Err(TyckError::NotAPlaceExpr { span: expr.span }),
         }?;
 
         expr.ty.set(Some(ty));

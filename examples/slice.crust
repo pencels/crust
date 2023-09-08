@@ -1,6 +1,7 @@
 extern "C" fn print_int_slice(slice: *[int]);
 extern "C" fn print_str_slice(slice: *[*str]);
 extern "C" fn print(slice: *str);
+extern "C" fn printf(s: *char);
 
 fn main(args: *[*str]) {
     let ints: [int; 6] = [1, 2, 3, 4, 5, 6];
@@ -17,5 +18,18 @@ fn main(args: *[*str]) {
     print(&s[..]);
     print(&s[2..5]);
     print(&s[..][2..5][..]);
-}
 
+    let slice = &s[..];
+    print(&slice[..]);
+    print(&slice[2..5]);
+    print(&slice[..][2..5][..]);
+
+    print(&s[..]);
+    print(&(&s)[..]);
+
+    let mut vals = ['a', 'b', 'c', '\n', '\0'];
+
+    let c = &mut vals[1..3];
+    c[0] = 'x';
+    printf(&vals as *char);
+}

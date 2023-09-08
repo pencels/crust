@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
 
-use inkwell::values::BasicValue;
+use inkwell::values::{BasicValue, IntValue};
 use inkwell::AddressSpace;
 use inkwell::{
     builder::Builder,
@@ -16,8 +16,10 @@ use inkwell::{
     values::{BasicValueEnum, FunctionValue, PointerValue},
 };
 
-use crate::parser::ast::{BinOpKind, Operator};
-use crate::tyck::{Type, TypeKind, VarId};
+use crate::parser::ast::{BinOpKind, Operator, PrefixOpKind, Spanned};
+use crate::tyck::{
+    Type, TypeKind, VarId, RANGE_FROM_TY_NAME, RANGE_FULL_TY_NAME, RANGE_TO_TY_NAME, RANGE_TY_NAME,
+};
 use crate::util;
 use crate::{
     parser::ast::{DeclInfo, Defn, DefnKind, Expr, ExprKind, Stmt, StmtKind},
@@ -60,7 +62,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     pub fn emit_ir(
         module_name: &str,
         output_path: &Utf8Path,
-        program: &[Defn],
+        program: &[Defn<'alloc>],
         struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
     ) -> Result<(), LLVMString> {
         let context = &Context::create();
@@ -125,6 +127,20 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
             ty.set_body(&field_types, false);
         }
+
+        // Add range structs
+        self.context
+            .opaque_struct_type("Range")
+            .set_body(&[self.size_type().into(), self.size_type().into()], false);
+        self.context
+            .opaque_struct_type("RangeFrom")
+            .set_body(&[self.size_type().into()], false);
+        self.context
+            .opaque_struct_type("RangeTo")
+            .set_body(&[self.size_type().into()], false);
+        self.context
+            .opaque_struct_type("RangeFull")
+            .set_body(&[], false);
     }
 
     /// Unit type `()`.
@@ -134,10 +150,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     fn generic_slice_type(&self) -> StructType<'ctx> {
         self.context.struct_type(
-            &[
-                self.opaque_ptr_type().into(),
-                self.context.i32_type().into(),
-            ],
+            &[self.opaque_ptr_type().into(), self.size_type().into()],
             false,
         )
     }
@@ -145,9 +158,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     fn ty_to_ll_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         use TypeKind::*;
         match ty.kind {
-            Integral(_) => {
-                unreachable!("all integral types should have been resolved to a sized integer type")
-            }
+            Integral(_) => self.context.i32_type().into(),
             Bool => self.context.bool_type().into(),
             Byte | Char => self.context.i8_type().into(),
             Short | UShort => self.context.i16_type().into(),
@@ -159,8 +170,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 .into(),
             Float => self.context.f32_type().into(),
             Double => self.context.f64_type().into(),
-            Str => unreachable!("bare str cannot be repr'd as an LLVM type"),
-            Slice(_) => unreachable!("bare slice cannot be repr'd as an LLVM type"),
+            Str => self.context.i8_type().array_type(0).into(),
+            Slice(t) => self.ty_to_ll_type(*t).array_type(0).into(),
             Struct(name) => self.context.get_struct_type(name).unwrap().into(),
             Pointer(
                 _,
@@ -256,7 +267,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
-    pub fn emit_defn(&mut self, defn: &Defn) {
+    pub fn emit_defn(&mut self, defn: &Defn<'alloc>) {
         match &defn.kind {
             DefnKind::Fn {
                 decl, params, body, ..
@@ -273,7 +284,13 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
     }
 
     /// Emits a function definition.
-    fn emit_fn(&mut self, decl: &DeclInfo, params: &[DeclInfo], ret_ty: &Type, body: &Expr) {
+    fn emit_fn(
+        &mut self,
+        decl: &DeclInfo,
+        params: &[DeclInfo],
+        ret_ty: &Type,
+        body: &Expr<'alloc>,
+    ) {
         let function = self
             .get_crust_function(decl.name.item())
             .expect("ICE: crust internal function not found");
@@ -314,8 +331,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         builder.build_alloca(ll_ty, "")
     }
 
-    /// Builds a `*str` fat pointer with the given address (`ptr`) and byte length (`size`).
-    fn build_str_slice(&self, ptr: PointerValue<'ctx>, size: usize) -> BasicValueEnum<'ctx> {
+    /// Builds a fat pointer with the given address (`ptr`) and byte length (`size`).
+    fn build_slice(&self, ptr: PointerValue<'ctx>, size: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
         let mut slice = self.generic_slice_type().get_undef();
         slice = self
             .builder
@@ -324,12 +341,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             .into_struct_value();
         slice = self
             .builder
-            .build_insert_value(
-                slice,
-                self.context.i32_type().const_int(size as u64, false),
-                1,
-                "",
-            )
+            .build_insert_value(slice, size, 1, "")
             .unwrap()
             .into_struct_value();
         slice.as_basic_value_enum()
@@ -337,7 +349,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
     fn int_type(&self, ty: &Type) -> IntType<'ctx> {
         match ty.kind {
-            TypeKind::Integral(_) => unreachable!("{}", "{integer} should be resolved by now"),
+            TypeKind::Integral(_) => self.context.i32_type(),
             TypeKind::Byte | TypeKind::Char => self.context.i8_type(),
             TypeKind::Short | TypeKind::UShort => self.context.i16_type(),
             TypeKind::Int | TypeKind::UInt => self.context.i32_type(),
@@ -349,7 +361,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         }
     }
 
-    fn emit_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
+    fn emit_expr(&mut self, expr: &Expr<'alloc>) -> BasicValueEnum<'ctx> {
         let value = match &expr.kind {
             ExprKind::Bool(v) => self.context.bool_type().const_int(*v as u64, false).into(),
             ExprKind::Int(v) => {
@@ -397,7 +409,10 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             ExprKind::Str(s) => {
                 let s = util::escape::unescape(s).unwrap();
                 let global = self.builder.build_global_string_ptr(&s, "");
-                self.build_str_slice(global.as_pointer_value(), s.as_bytes().len())
+                self.build_slice(
+                    global.as_pointer_value(),
+                    self.size_type().const_int(s.as_bytes().len() as u64, false),
+                )
             }
             ExprKind::Char(v) => self
                 .context
@@ -633,6 +648,18 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     return phi.as_basic_value();
                 };
 
+                if let Operator::Assign(op) = op.item() {
+                    match op {
+                        None => {
+                            let value = self.emit_expr(rhs);
+                            let (ptr, _) = self.emit_place_expr(lhs);
+                            self.builder.build_store(ptr, value);
+                            return self.unit_value();
+                        }
+                        _ => todo!(),
+                    }
+                };
+
                 let lhs_value = self.emit_expr(lhs);
                 let rhs_value = self.emit_expr(rhs);
                 match op.item() {
@@ -862,31 +889,75 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                             "ICE: lazy boolean operators should have been handled already"
                         ),
                     },
-                    Operator::Assign(None) => {
-                        let value = self.emit_expr(rhs);
-                        match &lhs.kind {
-                            ExprKind::Tuple(_) => todo!(),
-                            ExprKind::Id(name, id, decl) => {
-                                let id = id.get().unwrap();
-                                let ptr = self.variables.get(&id).unwrap();
-                                self.builder.build_store(*ptr, value);
-                                self.unit_value()
-                            }
-                            ExprKind::PrefixOp(_, _) => todo!(),
-                            ExprKind::BinOp(_, _, _) => todo!(),
-                            ExprKind::Group(_) => todo!(),
-                            ExprKind::Field(_, _, _, _) => todo!(),
-                            ExprKind::Index(_, _, _, _) => todo!(),
-                            _ => unreachable!(),
-                        }
-                    }
-                    _ => todo!(),
+                    _ => unreachable!("ICE: other operators should have been handled already"),
+                }
+            }
+            ExprKind::Field(lhs, op, field, autoderef) => {
+                let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
+                let (mut lhs_ptr, _) = self.emit_place_expr(lhs);
+                for _ in 0..num_derefs {
+                    lhs_ptr = self
+                        .builder
+                        .build_load(self.opaque_ptr_type(), lhs_ptr, "")
+                        .into_pointer_value();
+                }
+
+                let ptr = unsafe {
+                    self.builder.build_gep(
+                        self.ty_to_ll_type(autoderef_ty),
+                        lhs_ptr,
+                        &[self
+                            .size_type()
+                            .const_int(field.item().get_index() as u64, false)],
+                        "",
+                    )
+                };
+
+                self.builder
+                    .build_load(self.ty_to_ll_type(expr.ty.get().unwrap()), ptr, "")
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::AmpMut | PrefixOpKind::Amp), expr) => {
+                match self.emit_place_expr(expr) {
+                    (ptr, None) => ptr.as_basic_value_enum(),
+                    (ptr, Some(size)) => self.build_slice(ptr, size),
+                }
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
+                match self.emit_place_expr(expr) {
+                    (ptr, None) => self
+                        .builder
+                        .build_load(self.ty_to_ll_type(expr.ty.get().unwrap()), ptr, "")
+                        .as_basic_value_enum(),
+                    _ => panic!("ICE: metadata found on plain deref expr"),
+                }
+            }
+            ExprKind::Index(lhs, index, autoderef) => {
+                let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
+                let (mut lhs_ptr, _) = self.emit_place_expr(lhs);
+                for _ in 0..num_derefs {
+                    lhs_ptr = self
+                        .builder
+                        .build_load(self.opaque_ptr_type(), lhs_ptr, "")
+                        .into_pointer_value();
+                }
+                let index_value = self.emit_expr(index);
+
+                if index.effective_ty().unwrap().is_int() {
+                    let ptr = unsafe {
+                        self.builder.build_gep(
+                            self.ty_to_ll_type(autoderef_ty),
+                            lhs_ptr,
+                            &[self.size_type().const_zero(), index_value.into_int_value()],
+                            "",
+                        )
+                    };
+                    self.builder
+                        .build_load(self.ty_to_ll_type(expr.ty.get().unwrap()), ptr, "")
+                } else {
+                    unreachable!("ICE: non-integer indexing in rval position")
                 }
             }
             _ => todo!(),
-            // ExprKind::PrefixOp(_, _) => todo!(),
-            // ExprKind::Field(_, _, _, _) => todo!(),
-            // ExprKind::Index(_, _, _, _) => todo!(),
         };
 
         // If there's a coercion, apply type conversion after the main expression has been emitted.
@@ -894,6 +965,194 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             (Some(from_ty), Some(to_ty)) => self.build_conversion(value, from_ty, to_ty),
             _ => value,
         }
+    }
+
+    // fn promote_fat_pointer(
+    //     &self,
+    //     ptr: PointerValue<'ctx>,
+    //     ty: Type<'alloc>,
+    // ) -> (PointerValue<'ctx>, Option<IntValue<'ctx>>) {
+    //     match ty.kind {
+    //         TypeKind::Array(_, n) => (ptr, Some(self.size_type().const_int(n as u64, false))),
+    //         TypeKind::Pointer(..) => {
+    //             if ty.is_sized_ptr() {
+    //                 (ptr, None)
+    //             } else {
+    //                 let ptr = self
+    //                     .builder
+    //                     .build_extract_value(val.into_struct_value(), 0, "")
+    //                     .unwrap();
+    //                 let size = self
+    //                     .builder
+    //                     .build_extract_value(val.into_struct_value(), 1, "")
+    //                     .unwrap();
+    //                 (ptr.into_pointer_value(), Some(size.into_int_value()))
+    //             }
+    //         }
+    //         _ => (ptr, None),
+    //     }
+    // }
+
+    fn emit_place_expr(
+        &mut self,
+        expr: &Expr<'alloc>,
+    ) -> (PointerValue<'ctx>, Option<IntValue<'ctx>>) {
+        match &expr.kind {
+            ExprKind::Id(_, id, _) => {
+                let id = id.get().unwrap();
+                let ptr = self.variables.get(&id).unwrap();
+                (*ptr, None)
+            }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
+                (self.emit_expr(expr).into_pointer_value(), None)
+            }
+            ExprKind::Field(expr, _, field, autoderef) => {
+                let (mut ptr, _) = self.emit_place_expr(expr);
+                let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
+                for _ in 0..num_derefs {
+                    ptr = self
+                        .builder
+                        .build_load(self.opaque_ptr_type(), ptr, "")
+                        .into_pointer_value();
+                }
+                let ptr = unsafe {
+                    self.builder.build_gep(
+                        self.ty_to_ll_type(autoderef_ty),
+                        ptr,
+                        &[self
+                            .size_type()
+                            .const_int(field.item().get_index() as u64, false)],
+                        "",
+                    )
+                };
+                (ptr, None)
+            }
+            ExprKind::Group(expr) => self.emit_place_expr(expr),
+            ExprKind::Index(lhs, index, autoderef) => {
+                let (mut ptr, metadata) = self.emit_place_expr(lhs);
+                let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
+                for _ in 0..num_derefs {
+                    ptr = self
+                        .builder
+                        .build_load(self.opaque_ptr_type(), ptr, "")
+                        .into_pointer_value();
+                }
+
+                let index_value = self.emit_expr(index);
+
+                if expr.ty.get().unwrap().is_sized() {
+                    let ptr = unsafe {
+                        self.builder.build_gep(
+                            self.ty_to_ll_type(autoderef_ty),
+                            ptr,
+                            &[self.size_type().const_zero(), index_value.into_int_value()],
+                            "",
+                        )
+                    };
+                    (ptr, None)
+                } else {
+                    self.calculate_slice(
+                        autoderef_ty,
+                        ptr,
+                        metadata,
+                        index.ty.get().unwrap(),
+                        index_value,
+                    )
+                }
+            }
+            _ => (self.emit_expr(expr).into_pointer_value(), None),
+        }
+    }
+
+    fn pointee_ty(&self, ty: Type<'alloc>) -> BasicTypeEnum<'ctx> {
+        match ty.kind {
+            TypeKind::Array(..) => self.ty_to_ll_type(ty),
+            TypeKind::Slice(t) => self.ty_to_ll_type(*t).array_type(0).into(),
+            TypeKind::Str => self.context.i8_type().array_type(0).into(),
+            TypeKind::Pointer(_, t) => self.ty_to_ll_type(*t),
+            _ => panic!("ICE: unexpected non-indexable type"),
+        }
+    }
+
+    fn calculate_slice(
+        &self,
+        ty: Type<'alloc>,
+        ptr: PointerValue<'ctx>,
+        metadata: Option<IntValue<'ctx>>,
+        index_ty: Type<'alloc>,
+        index_value: BasicValueEnum<'ctx>,
+    ) -> (PointerValue<'ctx>, Option<IntValue<'ctx>>) {
+        let TypeKind::Struct(
+            name @ (RANGE_TY_NAME | RANGE_FULL_TY_NAME | RANGE_TO_TY_NAME | RANGE_FROM_TY_NAME),
+        ) = index_ty.kind
+        else {
+            panic!("ICE: slicing with a non-range index");
+        };
+
+        let pointee_ty = self.pointee_ty(ty);
+
+        // Extract the size (number of elements) of the parent slice or array
+        let (ptr, size) = match metadata {
+            Some(size) => (ptr, size),
+            None => match ty.kind {
+                TypeKind::Array(_, size) => (ptr, self.size_type().const_int(size as u64, false)),
+                TypeKind::Pointer(_, t) if !t.is_sized() => {
+                    let val = self
+                        .builder
+                        .build_load(self.generic_slice_type(), ptr, "")
+                        .into_struct_value();
+                    let ptr = self.builder.build_extract_value(val, 0, "").unwrap();
+                    let size = self.builder.build_extract_value(val, 1, "").unwrap();
+                    (ptr.into_pointer_value(), size.into_int_value())
+                }
+                _ => panic!("ICE: slicing a place which is not an array or slice pointer itself"),
+            },
+        };
+
+        // Calculate the offset and the new size given the index
+        let (offset, new_size) = match name {
+            RANGE_TY_NAME => {
+                let from = self
+                    .builder
+                    .build_extract_value(index_value.into_struct_value(), 0, "")
+                    .unwrap();
+                let to = self
+                    .builder
+                    .build_extract_value(index_value.into_struct_value(), 1, "")
+                    .unwrap();
+                let size =
+                    self.builder
+                        .build_int_sub(to.into_int_value(), from.into_int_value(), "");
+                (from.into_int_value(), size)
+            }
+            RANGE_FULL_TY_NAME => (self.size_type().const_zero(), size),
+            RANGE_TO_TY_NAME => {
+                let to = self
+                    .builder
+                    .build_extract_value(index_value.into_struct_value(), 0, "")
+                    .unwrap();
+                (self.size_type().const_zero(), to.into_int_value())
+            }
+            RANGE_FROM_TY_NAME => {
+                let from = self
+                    .builder
+                    .build_extract_value(index_value.into_struct_value(), 0, "")
+                    .unwrap();
+                let size = self.builder.build_int_sub(size, from.into_int_value(), "");
+                (from.into_int_value(), size)
+            }
+            _ => unreachable!(),
+        };
+
+        let new_ptr = unsafe {
+            self.builder.build_gep(
+                pointee_ty,
+                ptr,
+                &[self.size_type().const_zero(), offset],
+                "",
+            )
+        };
+        (new_ptr, Some(new_size))
     }
 
     fn int_cmp_op(&self, op: &BinOpKind, signed: bool) -> Option<inkwell::IntPredicate> {
@@ -944,7 +1203,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         })
     }
 
-    fn emit_block(&mut self, stmts: &[Stmt]) -> BasicValueEnum<'ctx> {
+    fn emit_block(&mut self, stmts: &[Stmt<'alloc>]) -> BasicValueEnum<'ctx> {
         let mut value = self.unit_value();
         for stmt in stmts {
             value = self.emit_stmt(stmt);
@@ -952,7 +1211,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         value
     }
 
-    fn emit_stmt(&mut self, stmt: &Stmt) -> BasicValueEnum<'ctx> {
+    fn emit_stmt(&mut self, stmt: &Stmt<'alloc>) -> BasicValueEnum<'ctx> {
         match &stmt.kind {
             StmtKind::Let(decl, expr) => {
                 let value = self.emit_expr(expr);

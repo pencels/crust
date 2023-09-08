@@ -1,0 +1,42 @@
+extern "C" fn print(s: *str);
+extern "C" fn print_char(c: char);
+
+fn print_board(board: *[[char; 3]; 3]) {
+    let mut r: uint = 0;
+
+    while r < 3 {
+        let mut c: uint = 0;
+
+        print_char('|');
+        while c < 3 {
+            print_char(board[r][c]);
+            print_char('|');
+            c = c + 1;
+        }
+        print_char('\n');
+        r = r + 1;
+    }
+}
+
+fn main() {
+    let mut board = [
+        [' ', ' ', 'x'],
+        [' ', ' ', ' '],
+        [' ', ' ', ' '],
+    ];
+
+    print_board(&board);
+    print_char('\n');
+
+    let cell = &mut board[0][2];
+    *cell = 'o';
+
+    let p = &board as *() as *char;
+    print_char(*(p + 2));
+    
+    print("\n");
+
+    print_board(&board);
+    print_char('\n');
+}
+

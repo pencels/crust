@@ -1,0 +1,16 @@
+extern "C" fn print_int(i: int);
+
+fn main() {
+    let mut t: (int, int, int) = (1, 2, 3);
+    let mut p = &mut t;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    let mut p = &mut p;
+    p.0 = 42;
+    print_int(t.0);
+}
+

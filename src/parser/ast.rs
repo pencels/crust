@@ -134,13 +134,17 @@ pub enum ExprKind<'a> {
     Cast(&'a Expr<'a>, Type<'a>),
 
     Group(&'a Expr<'a>),
-    Field(&'a Expr<'a>, Span, Spanned<Field<'a>>, Cell<usize>),
+    Field(
+        &'a Expr<'a>,
+        Span,
+        Spanned<Field<'a>>,
+        Cell<Option<(usize, tyck::Type<'a>)>>,
+    ),
     Call(&'a Expr<'a>, &'a [Expr<'a>]),
     Index(
         &'a Expr<'a>,
         &'a Expr<'a>,
-        Cell<usize>,
-        Cell<Option<tyck::Type<'a>>>,
+        Cell<Option<(usize, tyck::Type<'a>)>>,
     ),
     Range(Option<&'a Expr<'a>>, Option<&'a Expr<'a>>),
     Block(&'a [Stmt<'a>]),
@@ -359,7 +363,7 @@ pub fn make_index_expr<'b>(
     let lhs = bump.alloc(lhs);
     let index = bump.alloc(index);
     Expr::new(
-        ExprKind::Index(lhs, index, Cell::new(0), Cell::new(None)),
+        ExprKind::Index(lhs, index, Cell::new(None)),
         Span::new(file_id, start, end),
     )
 }
@@ -470,7 +474,7 @@ pub fn make_field_expr<'b, 'input>(
     let expr = bump.alloc(expr);
     let field_span = field.span();
     Expr::new(
-        ExprKind::Field(expr, op.span(), field, Cell::new(0)),
+        ExprKind::Field(expr, op.span(), field, Cell::new(None)),
         expr.span.unite(field_span),
     )
 }

@@ -217,17 +217,6 @@ impl<'a> Type<'a> {
         }
     }
 
-    pub fn index<'b>() -> Vec<Type<'b>> {
-        vec![
-            Type::new_dummy(TypeKind::USize),
-            Type::new_dummy(TypeKind::Int),
-            Type::new_dummy(TypeKind::Struct("Range")),
-            Type::new_dummy(TypeKind::Struct("RangeFrom")),
-            Type::new_dummy(TypeKind::Struct("RangeTo")),
-            Type::new_dummy(TypeKind::Struct("RangeFull")),
-        ]
-    }
-
     pub fn is_int(&self) -> bool {
         match self.kind {
             TypeKind::Byte
@@ -451,81 +440,6 @@ fn tyck_assign(
     }
 }
 
-/// Retrieves the type that is indexed by the given index.
-fn indexed_ty<'alloc>(
-    lhs_ty: Type<'alloc>,
-    lhs_span: Span,
-    index_ty: Type,
-    index_span: Span,
-) -> TyckResult<Type<'alloc>> {
-    let elem_ty = match lhs_ty.kind {
-        TypeKind::Slice(ty) => ty,
-        TypeKind::Pointer(
-            _,
-            Type {
-                kind: TypeKind::Slice(ty),
-                ..
-            },
-        ) => ty,
-        TypeKind::Pointer(
-            _,
-            Type {
-                kind: TypeKind::Str,
-                ..
-            },
-        ) => &Type::CHAR,
-        TypeKind::Pointer(
-            _,
-            Type {
-                kind: TypeKind::Array(ty, _),
-                ..
-            },
-        ) => ty,
-        TypeKind::Array(ty, _) => ty,
-        _ => {
-            return Err(TyckError::TypeNotIndexable {
-                span: lhs_span,
-                ty_name: human_type_name(&lhs_ty),
-            })
-        }
-    };
-
-    let place_ty = match index_ty.kind {
-        TypeKind::Int | TypeKind::USize => *elem_ty,
-        TypeKind::Struct(
-            RANGE_TY_NAME | RANGE_FROM_TY_NAME | RANGE_TO_TY_NAME | RANGE_FULL_TY_NAME,
-        ) => Type {
-            kind: TypeKind::Slice(elem_ty),
-            data: Span::dummy(),
-        },
-        _ => {
-            return Err(TyckError::TypeCannotBeUsedAsAnIndex {
-                span: index_span,
-                ty_name: human_type_name(&index_ty),
-            })
-        }
-    };
-    Ok(place_ty)
-}
-
-fn is_comparable(ty: &Type) -> bool {
-    match ty.kind {
-        TypeKind::Int
-        | TypeKind::UInt
-        | TypeKind::Short
-        | TypeKind::UShort
-        | TypeKind::Long
-        | TypeKind::ULong
-        | TypeKind::USize
-        | TypeKind::ISize
-        | TypeKind::Float
-        | TypeKind::Double
-        | TypeKind::Byte
-        | TypeKind::Char => true,
-        _ => false,
-    }
-}
-
 fn tyck_is_int_value(Spanned(ty_span, ty): Spanned<&Type>) -> TyckResult<()> {
     match ty.kind {
         TypeKind::Bool
@@ -594,63 +508,49 @@ fn tyck_is_of_type(Spanned(ty_span, ty): Spanned<&Type>, tys: &[Type]) -> TyckRe
     }
 }
 
-fn deref_until<'alloc, T>(
-    mut ty: Type<'alloc>,
-    num_derefs: &Cell<usize>,
-    cond: impl FnOnce(Type<'alloc>) -> TyckResult<T>,
-) -> TyckResult<T> {
+fn autoderef_ptr<'alloc>(mut ty: Type<'alloc>) -> (usize, Type<'alloc>) {
+    let mut num_derefs = 0;
     loop {
         match ty.kind {
             TypeKind::Array(..) => break,
             TypeKind::Pointer(
                 _,
                 Type {
-                    kind: TypeKind::Array(..) | TypeKind::Slice(_) | TypeKind::Str,
+                    kind: TypeKind::Slice(_) | TypeKind::Str,
                     ..
                 },
             ) => break,
             TypeKind::Pointer(_, inner) => {
-                num_derefs.set(num_derefs.get() + 1);
+                num_derefs += 1;
                 ty = *inner;
             }
             _ => break,
         }
     }
-    cond(ty)
+    (num_derefs, ty)
 }
 
-fn deref_place_until<'alloc, T>(
-    mut ty: Type<'alloc>,
-    place_mut: bool,
-    num_derefs: &Cell<usize>,
-    cond: impl FnOnce(bool, Type<'alloc>) -> TyckResult<T>,
-) -> TyckResult<T> {
+fn autoderef_place_ptr<'alloc>(mut ty: Type<'alloc>) -> (usize, bool, Type<'alloc>) {
+    let mut num_derefs = 0;
     let mut ptr_mut = true;
     loop {
         match ty.kind {
             TypeKind::Pointer(
                 _,
                 Type {
-                    kind: TypeKind::Array(..) | TypeKind::Slice(_) | TypeKind::Str,
+                    kind: TypeKind::Slice(_) | TypeKind::Str,
                     ..
                 },
             ) => break,
             TypeKind::Pointer(m, inner) => {
-                num_derefs.set(num_derefs.get() + 1);
+                num_derefs += 1;
                 ty = *inner;
                 ptr_mut &= m;
             }
             _ => break,
         }
     }
-    cond(
-        if num_derefs.get() > 0 {
-            ptr_mut
-        } else {
-            place_mut
-        },
-        ty,
-    )
+    (num_derefs, ptr_mut, ty)
 }
 
 pub struct TypeChecker<'alloc> {
@@ -807,11 +707,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     }
 
     /// Attempt to coerce an expression to a type.
-    fn coerce(
-        &mut self,
-        expr: &'alloc Expr<'alloc>,
-        to_ty: &Type<'alloc>,
-    ) -> TyckResult<Type<'alloc>> {
+    fn coerce(&mut self, expr: &Expr<'alloc>, to_ty: &Type<'alloc>) -> TyckResult<Type<'alloc>> {
         let from_ty = match expr.ty.get() {
             Some(ty) => ty,
             None => self.tyck_expr(expr)?,
@@ -895,7 +791,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         Ok(*to_ty)
     }
 
-    fn tyck_expr(&mut self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
+    fn tyck_expr(&mut self, expr: &Expr<'alloc>) -> TyckResult<Type<'alloc>> {
         let ty = match &expr.kind {
             ExprKind::Bool(_) => Ok(Type::new(TypeKind::Bool, expr.span)),
             ExprKind::Int(i) => Ok(Type::new(TypeKind::Integral(i), expr.span)),
@@ -1072,31 +968,39 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 let struct_name = self.bump.alloc_str(struct_name);
                 Ok(Type::new(TypeKind::Struct(struct_name), expr.span))
             }
-            ExprKind::Field(expr, _op_span, field, num_derefs) => {
+            ExprKind::Field(expr, _op_span, field, autoderef) => {
                 let expr_ty = self.tyck_expr(expr)?;
-                deref_until(expr_ty, num_derefs, |ty| {
-                    self.field_access_ty(Spanned(expr.span, ty), field)
-                })
+                let (n, autoderef_ty) = autoderef_ptr(expr_ty);
+                autoderef.set(Some((n, autoderef_ty)));
+                self.field_access_ty(Spanned(expr.span, autoderef_ty), field)
             }
             ExprKind::Group(expr) => self.tyck_expr(expr),
-            ExprKind::Index(lhs, index, num_derefs, autoderef_ty) => {
+            ExprKind::Index(lhs, index, autoderef) => {
                 let lhs_ty = self.tyck_expr(lhs)?;
                 let index_ty = self.tyck_expr(index)?;
-                deref_until(lhs_ty, num_derefs, |ty| {
-                    autoderef_ty.set(Some(ty));
-                    indexed_ty(ty, lhs.span, index_ty, index.span)
-                })
+                let (n, autoderef_ty) = autoderef_ptr(lhs_ty);
+                autoderef.set(Some((n, autoderef_ty)));
+                self.tyck_index(lhs, autoderef_ty, index, index_ty)
             }
             ExprKind::Range(start, end) => {
-                let index_tys = Type::index();
                 if let Some(start) = start {
-                    let start_ty = self.tyck_expr(start)?;
-                    tyck_is_of_type(Spanned(start.span, &start_ty), &index_tys)?;
+                    self.coerce(
+                        start,
+                        &Type {
+                            kind: TypeKind::ISize,
+                            data: start.span,
+                        },
+                    )?;
                 }
 
                 if let Some(end) = end {
-                    let end_ty = self.tyck_expr(end)?;
-                    tyck_is_of_type(Spanned(end.span, &end_ty), &index_tys)?;
+                    self.coerce(
+                        end,
+                        &Type {
+                            kind: TypeKind::ISize,
+                            data: end.span,
+                        },
+                    )?;
                 }
 
                 Ok(Type::new(
@@ -1114,6 +1018,81 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         expr.ty.set(Some(ty));
 
         Ok(ty)
+    }
+
+    /// Retrieves the type that is indexed by the given index.
+    fn tyck_index(
+        &mut self,
+        lhs: &Expr<'alloc>,
+        autoderef_lhs_ty: Type<'alloc>,
+        index: &Expr<'alloc>,
+        index_ty: Type<'alloc>,
+    ) -> TyckResult<Type<'alloc>> {
+        let (elem_ty, slice_ty) = match autoderef_lhs_ty.kind {
+            TypeKind::Str => (&Type::CHAR, autoderef_lhs_ty),
+            TypeKind::Slice(ty) => (ty, autoderef_lhs_ty),
+            TypeKind::Pointer(
+                _,
+                s @ Type {
+                    kind: TypeKind::Slice(ty),
+                    ..
+                },
+            ) => (*ty, *s),
+            TypeKind::Pointer(
+                _,
+                s @ Type {
+                    kind: TypeKind::Str,
+                    ..
+                },
+            ) => (&Type::CHAR, *s),
+            TypeKind::Pointer(
+                _,
+                Type {
+                    kind: TypeKind::Array(ty, _),
+                    ..
+                },
+            ) => (
+                *ty,
+                Type {
+                    kind: TypeKind::Slice(ty),
+                    data: autoderef_lhs_ty.data,
+                },
+            ),
+            TypeKind::Array(ty, _) => (
+                ty,
+                Type {
+                    kind: TypeKind::Slice(ty),
+                    data: autoderef_lhs_ty.data,
+                },
+            ),
+            _ => {
+                return Err(TyckError::TypeNotIndexable {
+                    span: lhs.span,
+                    ty_name: human_type_name(&autoderef_lhs_ty),
+                })
+            }
+        };
+
+        if index_ty.is_int() {
+            self.coerce(
+                index,
+                &Type {
+                    kind: TypeKind::USize,
+                    data: index.span,
+                },
+            )?;
+            Ok(*elem_ty)
+        } else if let TypeKind::Struct(
+            RANGE_TY_NAME | RANGE_FROM_TY_NAME | RANGE_TO_TY_NAME | RANGE_FULL_TY_NAME,
+        ) = index_ty.kind
+        {
+            Ok(slice_ty)
+        } else {
+            Err(TyckError::TypeCannotBeUsedAsAnIndex {
+                span: index.span,
+                ty_name: human_type_name(&index_ty),
+            })
+        }
     }
 
     fn tyck_cast(
@@ -1213,6 +1192,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     ) -> TyckResult<Type<'alloc>> {
         let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
 
+        if !lhs_ty.is_sized() {
+            return Err(TyckError::CannotAssignUnsized {
+                span: lhs.span,
+                ty_name: human_type_name(&lhs_ty),
+            });
+        }
+
         if !mutable {
             match source {
                 Some(Source::Id(s)) => {
@@ -1233,31 +1219,14 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             }
         }
 
-        let rhs_ty = self.tyck_expr(rhs)?;
+        self.coerce(rhs, &lhs_ty)?;
 
         let Spanned(op_span, op) = op;
-        let rhs_ty = match op {
-            Some(op) => self.tyck_simple_binop_expr(Spanned(op_span, op), lhs, rhs)?,
-            None => rhs_ty,
-        };
-
-        // Catch non-assignable types
-        if let TypeKind::Slice(_) = &lhs_ty.kind {
-            return Err(TyckError::CannotAssignUnsized {
-                span: lhs.span,
-                ty_name: human_type_name(&lhs_ty),
-            });
+        if let Some(op) = op {
+            self.tyck_simple_binop_expr(Spanned(op_span, op), lhs, rhs)?;
         }
 
-        if can_coerce(&rhs_ty, &lhs_ty) {
-            Ok(Type::UNIT)
-        } else {
-            Err(TyckError::MismatchedTypes {
-                expected_ty: human_type_name(&lhs_ty),
-                got: rhs.span,
-                got_ty: human_type_name(&rhs_ty),
-            })
-        }
+        Ok(Type::UNIT)
     }
 
     fn tyck_simple_binop_expr(
@@ -1503,7 +1472,10 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         }
     }
 
-    /// Typechecks an expr, expecting it to be a "place" or "lval" expr - one that indicates a memory location.
+    /// Typechecks an expr, expecting it to be a "place" or "lval" expr - one that indicates a memory location. Returns a tuple of:
+    /// - the mutability of the place (`bool`)
+    /// - the mutability source, if any (`Option<Source>`)
+    /// - the type of the place expr (`tyck::Type`)
     fn tyck_place_expr(
         &mut self,
         expr: &'alloc Expr<'alloc>,
@@ -1514,7 +1486,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok((
                     decl.mutable,
                     Some(Source::Id(decl.name.span())),
-                    decl.ty.get().expect("type"),
+                    decl.ty.get().unwrap(),
                 ))
             }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
@@ -1524,38 +1496,40 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     _ => return Err(TyckError::DereferencingNonPointer { span: expr.span }),
                 }
             }
-            ExprKind::Field(expr, _, field, num_derefs) => {
-                let (mutable, source, expr_ty) = self.tyck_place_expr(expr)?;
-                deref_place_until(expr_ty, mutable, num_derefs, move |mutable, ty| {
-                    let result_ty = self.field_access_ty(Spanned(expr.span, ty), field)?;
-                    Ok((
-                        mutable,
-                        if num_derefs.get() > 0 { None } else { source },
-                        result_ty,
-                    ))
-                })
+            ExprKind::Field(expr, _, field, autoderef) => {
+                let (place_mut, source, expr_ty) = self.tyck_place_expr(expr)?;
+                let (n, ptr_mut, ty) = autoderef_place_ptr(expr_ty);
+                autoderef.set(Some((n, ty)));
+                let result_ty = self.field_access_ty(Spanned(expr.span, ty), field)?;
+
+                Ok((
+                    if n > 0 { ptr_mut } else { place_mut },
+                    if n > 0 {
+                        Some(Source::Ptr(expr.span))
+                    } else {
+                        source
+                    },
+                    result_ty,
+                ))
             }
             ExprKind::Group(expr) => self.tyck_place_expr(expr),
-            ExprKind::Index(lhs, index, num_derefs, autoderef_ty) => {
-                let (mutable, source, lhs_ty) = self.tyck_place_expr(lhs)?;
-                deref_place_until(lhs_ty, mutable, num_derefs, move |mutable, ty| {
-                    let index_ty = self.tyck_expr(index)?;
-                    let place_ty = indexed_ty(ty, lhs.span, index_ty, index.span)?;
-                    autoderef_ty.set(Some(ty));
-                    Ok((
-                        mutable,
-                        if num_derefs.get() > 0 { None } else { source },
-                        place_ty,
-                    ))
-                })
+            ExprKind::Index(lhs, index, autoderef) => {
+                let (place_mut, source, lhs_ty) = self.tyck_place_expr(lhs)?;
+                let (n, ptr_mut, ty) = autoderef_place_ptr(lhs_ty);
+                autoderef.set(Some((n, ty)));
+                let index_ty = self.tyck_expr(index)?;
+                let place_ty = self.tyck_index(lhs, ty, index, index_ty)?;
+                Ok((
+                    if n > 0 { ptr_mut } else { place_mut },
+                    if n > 0 {
+                        Some(Source::Ptr(expr.span))
+                    } else {
+                        source
+                    },
+                    place_ty,
+                ))
             }
-            ExprKind::Cast(expr, to_ty_ast) => {
-                let (mutable, source, from_ty) = self.tyck_place_expr(expr)?;
-                let to_ty = Type::from(self, to_ty_ast)?;
-                self.tyck_cast(Spanned(expr.span, from_ty), Spanned(to_ty_ast.span, to_ty))?;
-                Ok((mutable, source, to_ty))
-            }
-            _ => Err(TyckError::NotAPlaceExpr { span: expr.span }),
+            _ => Err(TyckError::CannotAssignToExpr { span: expr.span }),
         }?;
 
         expr.ty.set(Some(ty));
@@ -1670,9 +1644,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             Some(decl_ty_ast) => self.coerce(expr, &Type::from(self, decl_ty_ast)?)?,
             None => {
                 let ty = self.tyck_expr(expr)?;
-                let ty = resolve_integral(&ty);
-                expr.ty.set(Some(*ty));
-                *ty
+                expr.ty.set(Some(ty));
+                ty
             }
         };
 

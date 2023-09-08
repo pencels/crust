@@ -23,6 +23,12 @@ pub enum TyckError {
         span: Span,
     },
 
+    #[message = "Cannot assign to expression"]
+    CannotAssignToExpr {
+        #[primary]
+        span: Span,
+    },
+
     #[message = "Expected a place expression in this position"]
     NotAPlaceExpr {
         #[primary]

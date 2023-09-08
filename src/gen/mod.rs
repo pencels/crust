@@ -593,21 +593,26 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     self.builder.position_at_end(then_block);
                     let then_value = self.emit_expr(then);
                     self.builder.build_unconditional_branch(dest);
-                    phi.add_incoming(&[(&then_value as &dyn BasicValue, then_block)]);
+                    phi.add_incoming(&[(
+                        &then_value as &dyn BasicValue,
+                        self.builder.get_insert_block().unwrap(),
+                    )]);
 
                     // Position builder for next iteration
                     self.builder.position_at_end(cond_or_else_block);
                 }
 
                 // Last block either has some instrs or results in `()`
-                let else_block = self.builder.get_insert_block().unwrap();
                 let last_value = if let Some(last) = last {
                     self.emit_expr(last)
                 } else {
                     self.unit_value()
                 };
                 self.builder.build_unconditional_branch(dest);
-                phi.add_incoming(&[(&last_value as &dyn BasicValue, else_block)]);
+                phi.add_incoming(&[(
+                    &last_value as &dyn BasicValue,
+                    self.builder.get_insert_block().unwrap(),
+                )]);
 
                 // Instructions continue at the destination block
                 self.builder.position_at_end(dest);

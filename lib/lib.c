@@ -77,6 +77,10 @@ void for_each(slice_ptr s, void (*action)(void*)) {
     }
 }
 
+FILE* get_stdin() {
+    return stdin;
+}
+
 extern int __crust__main(slice_ptr args);
 
 int main(int argc, char* argv[]) {

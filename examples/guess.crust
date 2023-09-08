@@ -1,0 +1,29 @@
+extern "C" fn atoi(s: *char) -> int;
+extern "C" fn fgets(s: *mut char, size: int, stream: *()) -> *char;
+extern "C" fn get_stdin() -> *();
+extern "C" fn printf(s: *str);
+extern "C" fn print(s: *str);
+
+fn main() {
+    let mut buf = ['\0'; 2048];
+    let mut reading = true;
+    let stdin = get_stdin();
+
+    while reading {
+        printf("Guess the number: ");
+        let result = fgets(&mut buf as *mut char, 2048, stdin);
+        if result {
+            let i = atoi(result);
+            if i == 42 {
+                print("Correct!");
+                reading = false;
+            } else if i > 42 {
+                print("Too high.");
+            } else {
+                print("Too low.");
+            }
+        } else {
+            reading = false;
+        }
+    }
+}

@@ -1,0 +1,31 @@
+extern "C" fn putchar(c: char);
+extern "C" fn print_int(i: int);
+
+fn print(s: *str) {
+    let mut i = 0 as usize;
+    let n = len s;
+    while i < n {
+        putchar(s[i]);
+        i = i + 1;
+    }
+    putchar('\n');
+}
+
+fn main(mut args: *[*str]) {
+    args = &args[1..];
+
+    let n = len args;
+
+    let mut i = 0 as usize; 
+    while i < n {
+        print(args[i]);
+        i = i + 1;
+    }
+
+    print_int(sub(10, 2) as int);
+}
+
+fn sub(x: usize, y: usize) -> usize {
+    len &""[y..x]
+}
+

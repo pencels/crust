@@ -247,6 +247,8 @@ pub enum PrefixOpKind {
 
     Amp,
     AmpMut,
+
+    Len,
 }
 
 #[derive(Debug)]

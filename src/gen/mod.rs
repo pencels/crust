@@ -310,7 +310,10 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 StmtKind::While(_, _)
                 | StmtKind::Let(_, _)
                 | StmtKind::Semi(_)
-                | StmtKind::Return(None) => self.build_return(None),
+                | StmtKind::Return(None) => {
+                    self.emit_stmt(last);
+                    self.build_return(None)
+                }
                 StmtKind::Expr(e) | StmtKind::Return(Some(e)) => {
                     let value = self.emit_expr(e);
                     self.build_return(Some(value));
@@ -945,6 +948,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 self.builder
                     .build_load(self.ty_to_ll_type(expr.ty.get().unwrap()), ptr, "")
             }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Len), expr) => {
+                let value = self.emit_expr(expr);
+                let (_, size) = self.extract_slice(value);
+                size.as_basic_value_enum()
+            }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::AmpMut | PrefixOpKind::Amp), expr) => {
                 match self.emit_place_expr(expr) {
                     (ptr, None) => ptr.as_basic_value_enum(),
@@ -961,21 +969,31 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
             }
             ExprKind::Index(lhs, index, autoderef) => {
+                let (mut ptr, metadata) = self.emit_place_expr(lhs);
                 let (num_derefs, autoderef_ty) = autoderef.get().unwrap();
-                let (mut lhs_ptr, _) = self.emit_place_expr(lhs);
+
+                let num_derefs = if autoderef_ty.is_slice_ptr() {
+                    num_derefs.saturating_sub(1)
+                } else {
+                    num_derefs
+                };
+
                 for _ in 0..num_derefs {
-                    lhs_ptr = self
+                    ptr = self
                         .builder
-                        .build_load(self.opaque_ptr_type(), lhs_ptr, "")
+                        .build_load(self.opaque_ptr_type(), ptr, "")
                         .into_pointer_value();
                 }
+
                 let index_value = self.emit_expr(index);
 
                 if index.effective_ty().unwrap().is_int() {
+                    let pointee_ty = self.pointee_ty(autoderef_ty);
+                    let (ptr, _) = self.get_data_ptr(&autoderef_ty, ptr, metadata);
                     let ptr = unsafe {
                         self.builder.build_gep(
-                            self.ty_to_ll_type(autoderef_ty),
-                            lhs_ptr,
+                            pointee_ty,
+                            ptr,
                             &[self.size_type().const_zero(), index_value.into_int_value()],
                             "",
                         )
@@ -994,6 +1012,20 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             (Some(from_ty), Some(to_ty)) => self.build_conversion(value, from_ty, to_ty),
             _ => value,
         }
+    }
+
+    fn extract_slice(&self, value: BasicValueEnum<'ctx>) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        let value = value.into_struct_value();
+        (
+            self.builder
+                .build_extract_value(value, 0, "")
+                .unwrap()
+                .into_pointer_value(),
+            self.builder
+                .build_extract_value(value, 1, "")
+                .unwrap()
+                .into_int_value(),
+        )
     }
 
     fn emit_place_expr(
@@ -1072,7 +1104,20 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     )
                 }
             }
-            _ => (self.emit_expr(expr).into_pointer_value(), None),
+            _ => self.emit_pointer_valued_expr(expr),
+        }
+    }
+
+    fn emit_pointer_valued_expr(
+        &mut self,
+        expr: &Expr<'alloc>,
+    ) -> (PointerValue<'ctx>, Option<IntValue<'ctx>>) {
+        let value = self.emit_expr(expr);
+        if expr.ty.get().unwrap().is_sized_ptr() {
+            (value.into_pointer_value(), None)
+        } else {
+            let (ptr, size) = self.extract_slice(value);
+            (ptr, Some(size))
         }
     }
 

@@ -242,6 +242,7 @@ UnaryOp: PrefixOpKind = {
     "*" => PrefixOpKind::Star,
     "!" => PrefixOpKind::Bang,
     "~" => PrefixOpKind::Tilde,
+    "len" => PrefixOpKind::Len,
 };
 
 MulOp: Operator = {

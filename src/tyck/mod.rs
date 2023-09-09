@@ -734,6 +734,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 | StmtKind::Semi(_)
                 | StmtKind::While(_, _)
                 | StmtKind::Return(None) => {
+                    self.tyck_stmt(last)?;
                     if !return_ty.is_unit() {
                         return Err(TyckError::NotAllPathsReturnAValue {
                             ret_ty_span: return_ty.data,
@@ -1081,7 +1082,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     self.coerce(
                         start,
                         &Type {
-                            kind: TypeKind::ISize,
+                            kind: TypeKind::USize,
                             data: start.span,
                         },
                     )?;
@@ -1091,7 +1092,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     self.coerce(
                         end,
                         &Type {
-                            kind: TypeKind::ISize,
+                            kind: TypeKind::USize,
                             data: end.span,
                         },
                     )?;
@@ -1517,6 +1518,20 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
     ) -> TyckResult<Type<'alloc>> {
         let ty = self.tyck_expr(expr)?;
         match op {
+            PrefixOpKind::Len => {
+                if ty.is_slice_ptr() {
+                    Ok(Type {
+                        kind: TypeKind::USize,
+                        data: op_span,
+                    })
+                } else {
+                    Err(TyckError::MismatchedTypes {
+                        expected_ty: "a slice type".to_string(),
+                        got: op_span,
+                        got_ty: human_type_name(&ty),
+                    })
+                }
+            }
             PrefixOpKind::Tilde => {
                 tyck_is_int_value(Spanned(expr.span, &ty))?;
                 Ok(ty)

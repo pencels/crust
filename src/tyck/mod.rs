@@ -1537,7 +1537,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok(ty)
             }
             PrefixOpKind::Bang => {
-                tyck_is_of_type(Spanned(expr.span, &ty), &[Type::new_dummy(TypeKind::Bool)])?;
+                self.coerce(expr, &Type::BOOL)?;
                 Ok(Type::new(TypeKind::Bool, op_span.unite(expr.span)))
             }
             PrefixOpKind::Plus => {

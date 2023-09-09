@@ -1,0 +1,13 @@
+extern "C" fn print(s: *str);
+
+fn main() {
+    let x = 0;
+
+    if !x {
+        print("yes");
+    } else {
+        print("no");
+    }
+
+    let y = ~x;
+}

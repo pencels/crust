@@ -567,7 +567,8 @@ pub struct TypeChecker<'alloc> {
     pub func_decl: HashMap<&'alloc str, &'alloc DeclInfo<'alloc>>,
     pub bump: &'alloc Bump,
     pub env: Env<'alloc>,
-    pub return_ty: Option<Type<'alloc>>,
+    return_ty: Option<Type<'alloc>>,
+    loop_level: usize,
 }
 
 impl<'check, 'alloc> TypeChecker<'alloc> {
@@ -579,6 +580,7 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
             bump,
             env: Env::new(),
             return_ty: None,
+            loop_level: 0,
         }
     }
 
@@ -730,6 +732,13 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
 
             // Make sure end of function body returns a value that makes sense
             match &last.kind {
+                StmtKind::Break | StmtKind::Continue => {
+                    if self.loop_level > 0 {
+                        return Err(TyckError::StatementCannotBeUsedOutsideOfLoop {
+                            span: last.span,
+                        });
+                    }
+                }
                 StmtKind::Let(_, _)
                 | StmtKind::Semi(_)
                 | StmtKind::While(_, _)
@@ -1778,12 +1787,21 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                 Ok(Type::UNIT)
             }
             StmtKind::While(cond, expr) => {
+                self.loop_level += 1;
                 self.coerce(cond, &Type::BOOL)?;
                 self.coerce(expr, &Type::UNIT)?;
+                self.loop_level -= 1;
                 Ok(Type::UNIT)
             }
             StmtKind::Return(Some(expr)) => self.tyck_expr(expr),
             StmtKind::Return(None) => Ok(Type::UNIT),
+            StmtKind::Break | StmtKind::Continue => {
+                if self.loop_level == 0 {
+                    Err(TyckError::StatementCannotBeUsedOutsideOfLoop { span: stmt.span })
+                } else {
+                    Ok(Type::UNIT)
+                }
+            }
         }
     }
 

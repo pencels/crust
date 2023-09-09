@@ -256,4 +256,10 @@ pub enum TyckError {
         #[primary = "control reaches end of function without returning a value"]
         last_stmt_span: Span,
     },
+
+    #[message = "Statement cannot be used outside of a loop"]
+    StatementCannotBeUsedOutsideOfLoop {
+        #[primary]
+        span: Span,
+    },
 }

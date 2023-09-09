@@ -1,0 +1,19 @@
+extern "C" fn print_int(i: int);
+
+fn main() {
+    let mut i = 0;
+    while true {
+        let mut j = 0;
+        while true {
+            print_int(i + j);
+            if j == 10 {
+                break;
+            }
+            j += 1;
+        }
+        if i == 10 {
+            break;
+        }
+        i += 1;
+    }
+}

@@ -1,4 +1,5 @@
 use camino::Utf8Path;
+use inkwell::basic_block::BasicBlock;
 use inkwell::support::LLVMString;
 use inkwell::targets::{InitializationConfig, Target, TargetData};
 use inkwell::types::{BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, StructType};
@@ -33,6 +34,7 @@ pub struct Emitter<'a, 'ctx, 'alloc> {
     pub builder: &'a Builder<'ctx>,
     pub module: &'a Module<'ctx>,
     pub opt_fn: Option<FunctionValue<'ctx>>,
+    within_loop: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 
     target_data: &'a TargetData,
     struct_infos: HashMap<&'alloc str, StructInfo<'alloc>>,
@@ -81,6 +83,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
             builder,
             module,
             opt_fn: None,
+            within_loop: Vec::new(),
             variables: HashMap::new(),
             struct_infos,
             target_data: engine.get_target_data(),
@@ -322,6 +325,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                         self.build_return(Some(value));
                     }
                 }
+                _ => unreachable!(),
             };
         } else {
             self.build_return(None);
@@ -1340,6 +1344,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let body_block = self.context.append_basic_block(func, "");
                 let dest_block = self.context.append_basic_block(func, "");
 
+                self.within_loop.push((dest_block, cond_block));
+
                 self.builder.build_unconditional_branch(cond_block);
 
                 self.builder.position_at_end(cond_block);
@@ -1356,6 +1362,8 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
 
                 self.builder.position_at_end(dest_block);
 
+                self.within_loop.pop();
+
                 self.unit_value()
             }
             StmtKind::Return(expr) => {
@@ -1371,6 +1379,22 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 let drop = self.context.append_basic_block(self.opt_fn.unwrap(), "");
                 self.builder.position_at_end(drop);
 
+                self.unit_value()
+            }
+            StmtKind::Break => {
+                let (end, _) = self.within_loop.last().unwrap();
+                self.builder.build_unconditional_branch(*end);
+
+                let rest_block = self.context.append_basic_block(self.opt_fn.unwrap(), "");
+                self.builder.position_at_end(rest_block);
+                self.unit_value()
+            }
+            StmtKind::Continue => {
+                let (_, again) = self.within_loop.last().unwrap();
+                self.builder.build_unconditional_branch(*again);
+
+                let rest_block = self.context.append_basic_block(self.opt_fn.unwrap(), "");
+                self.builder.position_at_end(rest_block);
                 self.unit_value()
             }
         }

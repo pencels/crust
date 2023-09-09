@@ -162,6 +162,8 @@ Stmt = {
     ExprStmt,
     WhileStmt,
     ReturnStmt,
+    BreakStmt,
+    ContinueStmt,
 };
 
 LetStmt: Stmt<'b> = {
@@ -179,6 +181,14 @@ WhileStmt: Stmt<'b> = {
 
 ReturnStmt: Stmt<'b> = {
     <@L> "return" <Expr?> ";" <@R> => ast::make_return_stmt(bump, file_id, <>),
+};
+
+BreakStmt: Stmt<'b> = {
+    <@L> "break" ";" <@R> => ast::make_break_stmt(bump, file_id, <>),
+};
+
+ContinueStmt: Stmt<'b> = {
+    <@L> "continue" ";" <@R> => ast::make_continue_stmt(bump, file_id, <>),
 };
 
 Type: Type<'b> = {

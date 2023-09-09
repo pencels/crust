@@ -1,7 +1,20 @@
+extern "C" fn print_int(i: int);
+
 fn sub(x: *int, y: *int) -> isize {
     x - y
 }
 
 fn indexed(x: *int, i: int) -> *int {
     x + i
+}
+
+fn main() {
+    let vals = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    let p = &vals as *int;
+
+    let q = indexed(p, 5);
+    print_int(*q);
+
+    let diff = sub(q, p);
+    print_int(diff as int);
 }

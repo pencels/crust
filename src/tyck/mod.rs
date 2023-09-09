@@ -1567,19 +1567,22 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                         op_span.unite(expr.span),
                     ))
                 } else {
-                    match source.unwrap() {
-                        Source::Id(s) | Source::Ptr(s) => {
+                    match source {
+                        Some(Source::Id(s) | Source::Ptr(s)) => {
                             Err(TyckError::MutPointerToNonMutLocation {
                                 addressing_op: op_span,
                                 location: expr.span,
                                 source: s,
                             })
                         }
-                        Source::Expr(s) => Err(TyckError::MutPointerToNonMutExpr {
+                        Some(Source::Expr(s)) => Err(TyckError::MutPointerToNonMutExpr {
                             addressing_op: op_span,
                             location: expr.span,
                             source: s,
                         }),
+                        None => {
+                            Err(TyckError::MutatingImmutableValueOfUnknownCause { span: expr.span })
+                        }
                     }
                 }
             }
@@ -1604,6 +1607,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
                     (decl.mutable, Some(Source::Id(decl.span)))
                 }
             }
+            ExprKind::Index(lhs, _, _) => self.mutability(lhs),
+            ExprKind::Field(lhs, _, _, _) => self.mutability(lhs),
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Amp), inner) => {
                 (false, Some(Source::Ptr(inner.span)))
             }

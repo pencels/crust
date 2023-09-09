@@ -739,14 +739,15 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                     (ptr, Some(size)) => self.build_slice(ptr, size),
                 }
             }
-            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), expr) => {
-                match self.emit_place_expr(expr) {
-                    (ptr, None) => self
-                        .builder
-                        .build_load(self.ty_to_ll_type(expr.ty.get().unwrap()), ptr, "")
-                        .as_basic_value_enum(),
-                    _ => panic!("ICE: metadata found on plain deref expr"),
-                }
+            ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Star), inner) => {
+                let ptr = self.emit_expr(inner);
+                self.builder
+                    .build_load(
+                        self.ty_to_ll_type(expr.ty.get().unwrap()),
+                        ptr.into_pointer_value(),
+                        "",
+                    )
+                    .as_basic_value_enum()
             }
             ExprKind::PrefixOp(Spanned(_, PrefixOpKind::Bang), expr) => {
                 let value = self.emit_expr(expr);
@@ -823,18 +824,22 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
         &mut self,
         ty: Type<'alloc>,
         op: BinOpKind,
-        lhs: &Expr<'alloc>,
-        rhs: &Expr<'alloc>,
+        lhs: &'alloc Expr<'alloc>,
+        rhs: &'alloc Expr<'alloc>,
     ) -> BasicValueEnum<'ctx> {
         let lhs_value = self.emit_expr(lhs);
         let rhs_value = self.emit_expr(rhs);
+
+        let lhs_ty = lhs.effective_ty().unwrap();
+        let rhs_ty = rhs.effective_ty().unwrap();
+
         match op {
             BinOpKind::Plus => {
-                if ty.is_int() {
+                if lhs_ty.is_int() {
                     self.builder
                         .build_int_add(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
                         .as_basic_value_enum()
-                } else if ty.is_float() {
+                } else if lhs_ty.is_float() {
                     self.builder
                         .build_float_add(
                             lhs_value.into_float_value(),
@@ -863,15 +868,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
             }
             BinOpKind::Minus => {
-                if ty == Type::ISIZE {
+                if lhs_ty.is_int() {
                     self.builder
                         .build_int_sub(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
                         .as_basic_value_enum()
-                } else if ty.is_int() {
-                    self.builder
-                        .build_int_sub(lhs_value.into_int_value(), rhs_value.into_int_value(), "")
-                        .as_basic_value_enum()
-                } else if ty.is_float() {
+                } else if lhs_ty.is_float() {
                     self.builder
                         .build_float_sub(
                             lhs_value.into_float_value(),
@@ -879,7 +880,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                             "",
                         )
                         .as_basic_value_enum()
-                } else if ty.is_sized_ptr() {
+                } else if lhs_ty.is_sized_ptr() && rhs_ty.is_int() {
                     let rhs_value = self.builder.build_int_neg(rhs_value.into_int_value(), "");
                     unsafe {
                         self.builder
@@ -891,6 +892,24 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                             )
                             .as_basic_value_enum()
                     }
+                } else if lhs_ty.is_sized_ptr() && rhs_ty.is_sized_ptr() {
+                    let pointee_ty = self.pointee_ty(lhs_ty);
+                    let pointee_size = pointee_ty.size_of().unwrap();
+
+                    let lhs_value = self.builder.build_ptr_to_int(
+                        lhs_value.into_pointer_value(),
+                        self.size_type(),
+                        "",
+                    );
+                    let rhs_value = self.builder.build_ptr_to_int(
+                        rhs_value.into_pointer_value(),
+                        self.size_type(),
+                        "",
+                    );
+                    let diff = self.builder.build_int_sub(lhs_value, rhs_value, "");
+                    self.builder
+                        .build_int_signed_div(diff, pointee_size, "")
+                        .as_basic_value_enum()
                 } else {
                     unreachable!()
                 }

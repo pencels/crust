@@ -316,7 +316,11 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                 }
                 StmtKind::Expr(e) | StmtKind::Return(Some(e)) => {
                     let value = self.emit_expr(e);
-                    self.build_return(Some(value));
+                    if e.effective_ty().unwrap().is_unit() {
+                        self.build_return(None);
+                    } else {
+                        self.build_return(Some(value));
+                    }
                 }
             };
         } else {
@@ -767,7 +771,7 @@ impl<'ctx, 'alloc> Emitter<'_, 'ctx, 'alloc> {
                                             self.ty_to_ll_type(*ty.pointee_ty().unwrap()),
                                             lhs_value.into_pointer_value(),
                                             &[rhs_value],
-                                            "",
+                                            "carly rae gepsen",
                                         )
                                         .as_basic_value_enum()
                                 }

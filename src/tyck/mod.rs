@@ -1790,7 +1790,8 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         let decl_ty = match &decl.ty_ast {
             Some(decl_ty_ast) => self.coerce(expr, &Type::from(self, decl_ty_ast)?)?,
             None => {
-                let ty = self.tyck_expr(expr)?;
+                self.tyck_expr(expr)?;
+                let ty = self.resolve_ty_vars(expr)?;
                 expr.ty.set(Some(ty));
                 ty
             }
@@ -1800,6 +1801,59 @@ impl<'check, 'alloc> TypeChecker<'alloc> {
         self.register_decl(decl);
 
         Ok(())
+    }
+
+    fn resolve_ty_vars(&self, expr: &'alloc Expr<'alloc>) -> TyckResult<Type<'alloc>> {
+        match expr.kind {
+            ExprKind::Tuple(exprs) => {
+                let results: TyckResult<Vec<_>> = exprs
+                    .into_iter()
+                    .map(|expr| self.resolve_ty_vars(expr))
+                    .collect();
+                Ok(Type {
+                    kind: TypeKind::Tuple(self.bump.alloc_slice_fill_iter(results?)),
+                    data: expr.span,
+                })
+            }
+            ExprKind::Array(exprs, _) => {
+                let TypeKind::Array(ty, size) = expr.effective_ty().unwrap().kind else {
+                    unreachable!()
+                };
+
+                let ty = match ty.kind {
+                    TypeKind::Integral(_) => Type {
+                        kind: TypeKind::Int,
+                        data: ty.data,
+                    },
+                    _ => *ty,
+                };
+
+                for expr in exprs {
+                    self.resolve_ty_vars(expr)?;
+                }
+
+                Ok(Type {
+                    kind: TypeKind::Array(self.bump.alloc(ty), size),
+                    data: expr.span,
+                })
+            }
+            ExprKind::Group(e) => self.resolve_ty_vars(e),
+            _ => {
+                let ty = expr.effective_ty().unwrap();
+                let ty = match ty.kind {
+                    TypeKind::Integral(_) => {
+                        let ty = Type {
+                            kind: TypeKind::Int,
+                            data: expr.span,
+                        };
+                        expr.coerced_ty.set(Some(ty));
+                        ty
+                    }
+                    _ => ty,
+                };
+                Ok(ty)
+            }
+        }
     }
 }
 

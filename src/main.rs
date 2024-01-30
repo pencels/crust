@@ -1,4 +1,4 @@
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 
 #[macro_use]
 extern crate structopt_derive;
@@ -10,9 +10,11 @@ mod tyck;
 mod util;
 
 use std::{
+    ffi::{OsStr, OsString},
     fs::File,
     io::Read,
-    path::PathBuf, process::Command, ffi::{OsStr, OsString},
+    path::PathBuf,
+    process::Command,
 };
 
 use bumpalo::Bump;
